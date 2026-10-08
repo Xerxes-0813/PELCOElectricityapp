@@ -79,6 +79,11 @@ export default function MyAppliancesScreen() {
   const [saving, setSaving] = useState(false);
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Appliance | null>(null);
+  const [deleteModalType, setDeleteModalType] = useState<
+    "confirm" | "success" | "error" | null
+  >(null);
+  const [deleteModalMessage, setDeleteModalMessage] = useState("");
 
   /*
    * AUTH LISTENER
@@ -510,166 +515,61 @@ export default function MyAppliancesScreen() {
   /*
    * DELETE APPLIANCE
    */
-  const handleDeleteAppliance = (
-    appliance: Appliance
-  ) => {
-    console.log(
-      "================================="
+  const handleDeleteAppliance = (appliance: Appliance) => {
+    if (deletingId) {
+      return;
+    }
+
+    setDeleteTarget(appliance);
+    setDeleteModalMessage(
+      `Are you sure you want to permanently delete "${appliance.name}"?`
     );
+    setDeleteModalType("confirm");
+  };
 
-    console.log(
-      "DELETE BUTTON PRESSED"
-    );
+  const confirmDeleteAppliance = async () => {
+    if (!deleteTarget || deletingId) {
+      return;
+    }
 
-    console.log(
-      "Appliance ID:",
-      appliance.id
-    );
+    const appliance = deleteTarget;
+    const currentUid = auth.currentUser?.uid;
 
-    console.log(
-      "Appliance name:",
-      appliance.name
-    );
+    setDeleteModalType(null);
 
-    console.log(
-      "Appliance customer ID:",
-      appliance.customerId
-    );
+    if (!currentUid || currentUid !== appliance.customerId) {
+      setDeleteModalMessage(
+        "You must be signed in as the owner of this appliance to delete it."
+      );
+      setDeleteModalType("error");
+      return;
+    }
 
-    console.log(
-      "Current Firebase user:",
-      auth.currentUser?.uid
-    );
+    try {
+      setDeletingId(appliance.id);
 
-    console.log(
-      "================================="
-    );
+      await deleteDoc(doc(db, "appliances", appliance.id));
 
-    Alert.alert(
-      "Delete Appliance",
-      `Are you sure you want to delete "${appliance.name}"?`,
-      [
-        {
-          text: "Cancel",
-          style: "cancel",
-          onPress: () => {
-            console.log(
-              "Delete cancelled."
-            );
-          },
-        },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            if (deletingId) {
-              return;
-            }
+      setAppliances((current) =>
+        current.filter((item) => item.id !== appliance.id)
+      );
+      setDeleteModalMessage(
+        `"${appliance.name}" was deleted successfully.`
+      );
+      setDeleteModalType("success");
+    } catch (error: any) {
+      console.log("Delete appliance error:", error);
 
-            try {
-              setDeletingId(appliance.id);
-
-              console.log(
-                "Starting Firestore delete..."
-              );
-
-              console.log(
-                "Collection: appliances"
-              );
-
-              console.log(
-                "Document ID:",
-                appliance.id
-              );
-
-              console.log(
-                "Current UID:",
-                auth.currentUser?.uid
-              );
-
-              const applianceRef = doc(
-                db,
-                "appliances",
-                appliance.id
-              );
-
-              console.log(
-                "Firestore document reference created."
-              );
-
-              await deleteDoc(
-                applianceRef
-              );
-
-              console.log(
-                "Firestore delete successful!"
-              );
-
-              /*
-               * Remove it immediately from
-               * the local screen as well.
-               *
-               * The onSnapshot listener should
-               * also update automatically.
-               */
-              setAppliances(
-                (current) =>
-                  current.filter(
-                    (item) =>
-                      item.id !==
-                      appliance.id
-                  )
-              );
-
-              Alert.alert(
-                "Deleted",
-                `"${appliance.name}" was deleted successfully.`
-              );
-            } catch (error: any) {
-              console.log(
-                "================================="
-              );
-
-              console.log(
-                "DELETE APPLIANCE ERROR"
-              );
-
-              console.log(
-                "Error code:",
-                error?.code
-              );
-
-              console.log(
-                "Error message:",
-                error?.message
-              );
-
-              console.log(
-                "Full error:",
-                error
-              );
-
-              console.log(
-                "================================="
-              );
-
-              Alert.alert(
-                "Delete Failed",
-                `Unable to delete "${appliance.name}".\n\nError code: ${
-                  error?.code ||
-                  "unknown"
-                }\n\n${
-                  error?.message ||
-                  "Unknown Firebase error."
-                }`
-              );
-            } finally {
-              setDeletingId(null);
-            }
-          },
-        },
-      ]
-    );
+      const code = error?.code || "unknown";
+      const details =
+        error?.message || "Unknown Firebase error.";
+      setDeleteModalMessage(
+        `Unable to delete "${appliance.name}".\n\nError code: ${code}\n${details}`
+      );
+      setDeleteModalType("error");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   /*
@@ -1523,6 +1423,84 @@ export default function MyAppliancesScreen() {
           </View>
         </View>
       </Modal>
+      <Modal
+        visible={deleteModalType !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!deletingId) {
+            setDeleteModalType(null);
+            setDeleteTarget(null);
+          }
+        }}
+      >
+        <View style={styles.deleteModalOverlay}>
+          <View style={styles.deleteModalCard}>
+            <Text style={styles.modalTitle}>
+              {deleteModalType === "confirm"
+                ? "Delete Appliance?"
+                : deleteModalType === "success"
+                  ? "Appliance Deleted"
+                  : "Delete Failed"}
+            </Text>
+            <Text style={styles.deleteModalMessage}>
+              {deleteModalMessage}
+            </Text>
+            <View style={styles.deleteModalActions}>
+              {deleteModalType === "confirm" ? (
+                <>
+                  <TouchableOpacity
+                    style={[
+                      styles.deleteModalButton,
+                      styles.deleteModalCancelButton,
+                    ]}
+                    onPress={() => {
+                      setDeleteModalType(null);
+                      setDeleteTarget(null);
+                    }}
+                    disabled={!!deletingId}
+                  >
+                    <Text style={styles.deleteModalCancelText}>
+                      Cancel
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.deleteModalButton,
+                      styles.deleteModalConfirmButton,
+                    ]}
+                    onPress={confirmDeleteAppliance}
+                    disabled={!!deletingId}
+                  >
+                    {deletingId ? (
+                      <ActivityIndicator color="#ffffff" />
+                    ) : (
+                      <Text style={styles.deleteModalConfirmText}>
+                        Delete
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <TouchableOpacity
+                  style={[
+                    styles.deleteModalButton,
+                    styles.deleteModalConfirmButton,
+                  ]}
+                  onPress={() => {
+                    setDeleteModalType(null);
+                    setDeleteTarget(null);
+                  }}
+                >
+                  <Text style={styles.deleteModalConfirmText}>
+                    Close
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2084,6 +2062,67 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     color: "#777777",
     fontSize: 13,
+    fontWeight: "700",
+  },
+
+  deleteModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+
+  deleteModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    padding: 24,
+    backgroundColor: "#ffffff",
+  },
+
+  deleteModalMessage: {
+    color: "#444444",
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 4,
+  },
+
+  deleteModalActions: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 10,
+    marginTop: 24,
+  },
+
+  deleteModalButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+  },
+
+  deleteModalCancelButton: {
+    borderWidth: 1,
+    borderColor: "#dddddd",
+  },
+
+  deleteModalCancelText: {
+    color: "#444444",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  deleteModalConfirmButton: {
+    backgroundColor: "#b33a3a",
+  },
+
+  deleteModalConfirmText: {
+    color: "#ffffff",
+    fontSize: 14,
     fontWeight: "700",
   },
 });

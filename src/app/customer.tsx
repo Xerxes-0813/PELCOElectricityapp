@@ -31,10 +31,13 @@ type Application = {
   inspectionNotes?: string;
   meterNumber?: string;
   meterId?: string;
+  installedAt?: any;
   submittedAt?: any;
   updatedAt?: any;
   inspectedAt?: any;
+  reviewedAt?: any;
   approvedAt?: any;
+  activatedAt?: any;
 };
 
 type Appliance = {
@@ -387,6 +390,35 @@ export default function CustomerScreen() {
     }
   };
 
+  const formatDateTime = (timestamp: any) => {
+    if (!timestamp) {
+      return "Date not recorded";
+    }
+
+    try {
+      const date =
+        typeof timestamp.toDate === "function"
+          ? timestamp.toDate()
+          : timestamp instanceof Date
+          ? timestamp
+          : new Date(timestamp);
+
+      if (Number.isNaN(date.getTime())) {
+        return "Date not recorded";
+      }
+
+      return date.toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+    } catch {
+      return "Date not recorded";
+    }
+  };
+
   const formatTime = (
     date: Date
   ) => {
@@ -423,12 +455,28 @@ export default function CustomerScreen() {
       return "Inspected";
     }
 
+    if (normalizedStatus === "inspection_passed") {
+      return "Inspection Passed";
+    }
+
+    if (normalizedStatus === "inspection_rejected") {
+      return "Inspection Rejected";
+    }
+
+    if (normalizedStatus === "reinspect") {
+      return "Re-Inspection Required";
+    }
+
     if (normalizedStatus === "approved") {
       return "Approved";
     }
 
     if (normalizedStatus === "active") {
       return "Active";
+    }
+
+    if (normalizedStatus === "meter_installed") {
+      return "Awaiting Service Activation";
     }
 
     if (normalizedStatus === "rejected") {
@@ -464,12 +512,28 @@ export default function CustomerScreen() {
       return "Your site inspection has been completed.";
     }
 
+    if (normalizedStatus === "inspection_passed") {
+      return "Your site inspection passed. Your meter is awaiting installation.";
+    }
+
+    if (normalizedStatus === "inspection_rejected") {
+      return "Your site inspection did not pass. Please review the inspection notes.";
+    }
+
+    if (normalizedStatus === "reinspect") {
+      return "Your site requires corrections and another inspection.";
+    }
+
     if (normalizedStatus === "approved") {
       return "Your application has been approved.";
     }
 
     if (normalizedStatus === "active") {
       return "Your electricity connection is active.";
+    }
+
+    if (normalizedStatus === "meter_installed") {
+      return "Your meter has been installed and is awaiting administrator service activation.";
     }
 
     if (normalizedStatus === "rejected") {
@@ -479,49 +543,110 @@ export default function CustomerScreen() {
     return "Your application is being processed.";
   };
 
-  const getProgressStep = () => {
-    if (!application) {
-      return 0;
-    }
-
-    if (normalizedStatus === "pending") {
-      return 1;
-    }
-
-    if (
-      normalizedStatus ===
-      "for inspection"
-    ) {
-      return 2;
-    }
-
-    if (
-      normalizedStatus ===
-      "inspected"
-    ) {
-      return 3;
-    }
-
-    if (
-      normalizedStatus ===
-      "approved"
-    ) {
-      return 4;
-    }
-
-    if (normalizedStatus === "active") {
-      return 5;
-    }
-
-    if (normalizedStatus === "rejected") {
-      return 0;
-    }
-
-    return 1;
-  };
-
-  const progressStep =
-    getProgressStep();
+  const applicationApproved = [
+    "approved",
+    "inspection",
+    "reinspect",
+    "inspection_passed",
+    "inspection_rejected",
+    "meter_installed",
+    "active",
+  ].includes(normalizedStatus);
+  const inspectionCompleted = [
+    "inspection_passed",
+    "inspection_rejected",
+    "meter_installed",
+    "active",
+  ].includes(normalizedStatus);
+  const inspectionPassed = [
+    "inspection_passed",
+    "meter_installed",
+    "active",
+  ].includes(normalizedStatus);
+  const applicationTimeline = application
+    ? [
+        {
+          title: "Application submitted",
+          status: "Submitted",
+          timestamp: application.submittedAt,
+          complete: true,
+          rejected: false,
+        },
+        {
+          title: "Application review",
+          status:
+            normalizedStatus === "rejected"
+              ? "Rejected"
+              : applicationApproved
+              ? "Approved"
+              : "Awaiting decision",
+          timestamp:
+            application.reviewedAt ||
+            application.approvedAt,
+          complete: applicationApproved,
+          rejected: normalizedStatus === "rejected",
+        },
+        {
+          title: "Site inspection",
+          status:
+            normalizedStatus === "rejected"
+              ? "Not started"
+              : inspectionCompleted
+              ? "Completed"
+              : applicationApproved
+              ? "Ready for inspection"
+              : "Waiting for application review",
+          timestamp: inspectionCompleted
+            ? application.inspectedAt
+            : application.approvedAt,
+          complete: inspectionCompleted,
+          rejected: false,
+        },
+        {
+          title: "Inspection decision",
+          status:
+            normalizedStatus === "inspection_rejected"
+              ? "Rejected"
+              : normalizedStatus === "rejected"
+              ? "Not started"
+              : normalizedStatus === "reinspect"
+              ? "Re-inspection required"
+              : inspectionPassed
+              ? "Approved"
+              : "Awaiting inspection",
+          timestamp: application.inspectedAt,
+          complete: inspectionCompleted,
+          rejected:
+            normalizedStatus === "inspection_rejected",
+        },
+        {
+          title: "Meter installation",
+          status:
+            ["meter_installed", "active"].includes(normalizedStatus)
+              ? "Meter installed"
+              : inspectionPassed
+              ? "Ready for installation"
+              : "Not started",
+          timestamp: application.installedAt,
+          complete: ["meter_installed", "active"].includes(
+            normalizedStatus
+          ),
+          rejected: false,
+        },
+        {
+          title: "Service activation",
+          status:
+            normalizedStatus === "active"
+              ? "Active"
+              : normalizedStatus === "meter_installed"
+              ? "Awaiting administrator activation"
+              : "Not active",
+          timestamp: application.activatedAt,
+          complete: normalizedStatus === "active",
+          rejected: false,
+        },
+      ]
+    : [];
 
   const showApplication =
     !!application;
@@ -715,73 +840,48 @@ export default function CustomerScreen() {
                 </View>
               </View>
 
-              {/* APPLICATION PROGRESS */}
-              {normalizedStatus !==
-                "rejected" && (
-                <View
-                  style={
-                    styles.progressContainer
-                  }
-                >
+              <View style={styles.timeline}>
+                {applicationTimeline.map((step, index) => (
                   <View
-                    style={
-                      styles.progressLine
-                    }
-                  />
-
-                  {[1, 2, 3, 4, 5].map(
-                    (step) => (
+                    key={step.title}
+                    style={styles.timelineStep}
+                  >
+                    <View style={styles.timelineMarkerColumn}>
                       <View
-                        key={step}
-                        style={
-                          styles.progressStep
-                        }
+                        style={[
+                          styles.timelineMarker,
+                          step.complete &&
+                            styles.timelineMarkerComplete,
+                          step.rejected &&
+                            styles.timelineMarkerRejected,
+                        ]}
+                      />
+                      {index < applicationTimeline.length - 1 ? (
+                        <View style={styles.timelineConnector} />
+                      ) : null}
+                    </View>
+                    <View style={styles.timelineContent}>
+                      <Text style={styles.timelineTitle}>
+                        {step.title}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.timelineStatus,
+                          step.complete &&
+                            styles.timelineStatusComplete,
+                          step.rejected &&
+                            styles.timelineStatusRejected,
+                        ]}
                       >
-                        <View
-                          style={[
-                            styles.progressCircle,
-                            progressStep >=
-                              step &&
-                              styles.progressCircleActive,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.progressNumber,
-                              progressStep >=
-                                step &&
-                                styles.progressNumberActive,
-                            ]}
-                          >
-                            {step}
-                          </Text>
-                        </View>
-
-                        <Text
-                          style={
-                            styles.progressLabel
-                          }
-                        >
-                          {step === 1 &&
-                            "Submitted"}
-
-                          {step === 2 &&
-                            "Inspection"}
-
-                          {step === 3 &&
-                            "Inspected"}
-
-                          {step === 4 &&
-                            "Approved"}
-
-                          {step === 5 &&
-                            "Active"}
-                        </Text>
-                      </View>
-                    )
-                  )}
-                </View>
-              )}
+                        {step.status}
+                      </Text>
+                      <Text style={styles.timelineTimestamp}>
+                        {formatDateTime(step.timestamp)}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
             </View>
 
             {/* APPLICATION DETAILS */}
@@ -1662,59 +1762,79 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  progressContainer: {
+  timeline: {
+    marginTop: 22,
+  },
+
+  timelineStep: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 24,
-    position: "relative",
+    minHeight: 68,
   },
 
-  progressLine: {
-    position: "absolute",
-    left: 16,
-    right: 16,
-    top: 16,
-    height: 2,
-    backgroundColor: "#d8e8db",
-  },
-
-  progressStep: {
-    width: "19%",
+  timelineMarkerColumn: {
+    width: 24,
     alignItems: "center",
   },
 
-  progressCircle: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+  timelineMarker: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
     backgroundColor: "#edf2ee",
-    borderWidth: 1,
-    borderColor: "#d5e1d7",
-    alignItems: "center",
-    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#cbd8ce",
+    zIndex: 1,
   },
 
-  progressCircleActive: {
+  timelineMarkerComplete: {
     backgroundColor: "#176b3a",
     borderColor: "#176b3a",
   },
 
-  progressNumber: {
-    color: "#7b8a80",
-    fontSize: 11,
+  timelineMarkerRejected: {
+    backgroundColor: "#c94b4b",
+    borderColor: "#c94b4b",
+  },
+
+  timelineConnector: {
+    position: "absolute",
+    top: 14,
+    bottom: 0,
+    width: 2,
+    backgroundColor: "#d8e8db",
+  },
+
+  timelineContent: {
+    flex: 1,
+    paddingLeft: 10,
+    paddingBottom: 14,
+  },
+
+  timelineTitle: {
+    color: "#153d27",
+    fontSize: 12,
     fontWeight: "900",
   },
 
-  progressNumberActive: {
-    color: "#ffffff",
+  timelineStatus: {
+    color: "#6b786f",
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 2,
   },
 
-  progressLabel: {
-    color: "#6c7b70",
-    fontSize: 8,
-    fontWeight: "700",
-    textAlign: "center",
-    marginTop: 6,
+  timelineStatusComplete: {
+    color: "#176b3a",
+  },
+
+  timelineStatusRejected: {
+    color: "#b53b3b",
+  },
+
+  timelineTimestamp: {
+    color: "#87938a",
+    fontSize: 10,
+    marginTop: 3,
   },
 
   applicationDetails: {

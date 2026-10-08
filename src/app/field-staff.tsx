@@ -13,6 +13,7 @@ import {
     ActivityIndicator,
     Alert,
     KeyboardAvoidingView,
+    Modal,
     Platform,
     ScrollView,
     StyleSheet,
@@ -61,6 +62,26 @@ type ReadingInputs = {
   [applicationId: string]: string;
 };
 
+type CustomerAppliance = {
+  id: string;
+  customerId: string;
+  name: string;
+  wattage: number;
+  status: "on" | "off";
+  turnedOnAt?: any;
+  totalKwh?: number;
+};
+
+type ActionModalState = {
+  type: "confirm" | "result";
+  title: string;
+  message: string;
+  actionLabel?: string;
+  resultType?: "success" | "error";
+  busy?: boolean;
+  onConfirm?: () => Promise<string>;
+};
+
 const generateMeterNumber = () => {
   const year = new Date().getFullYear();
   const randomNumber = Math.floor(1000 + Math.random() * 9000);
@@ -73,6 +94,16 @@ export default function FieldStaffScreen() {
   const [loading, setLoading] = useState(true);
   const [readingInputs, setReadingInputs] = useState<ReadingInputs>({});
   const [savingReadingId, setSavingReadingId] = useState<string | null>(
+    null
+  );
+  const [customerAppliances, setCustomerAppliances] = useState<
+    CustomerAppliance[]
+  >([]);
+  const [energyClock, setEnergyClock] = useState(Date.now());
+  const [expandedApplicationIds, setExpandedApplicationIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [actionModal, setActionModal] = useState<ActionModalState | null>(
     null
   );
 
@@ -109,6 +140,145 @@ export default function FieldStaffScreen() {
 
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      collection(db, "appliances"),
+      (snapshot) => {
+        const applianceList: CustomerAppliance[] = snapshot.docs.map(
+          (document) => {
+            const data = document.data();
+            return {
+              id: document.id,
+              customerId: data.customerId || "",
+              name: data.name || "",
+              wattage: Number(data.wattage || 0),
+              status: data.status === "on" ? "on" : "off",
+              turnedOnAt: data.turnedOnAt,
+              totalKwh: Number(data.totalKwh || 0),
+            };
+          }
+        );
+        setCustomerAppliances(applianceList);
+      },
+      (error) => {
+        console.log("Field Staff appliance loading error:", error);
+        Alert.alert(
+          "Unable to Load Appliance Usage",
+          error.message || "Unable to load customer appliance usage."
+        );
+      }
+    );
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => setEnergyClock(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const toggleApplicationExpanded = (applicationId: string) => {
+    setExpandedApplicationIds((current) => {
+      const next = new Set(current);
+      if (next.has(applicationId)) {
+        next.delete(applicationId);
+      } else {
+        next.add(applicationId);
+      }
+      return next;
+    });
+  };
+
+  const requestAction = (
+    title: string,
+    message: string,
+    actionLabel: string,
+    onConfirm: () => Promise<string>
+  ) => {
+    setActionModal({
+      type: "confirm",
+      title,
+      message,
+      actionLabel,
+      onConfirm,
+    });
+  };
+
+  const confirmAction = async () => {
+    if (!actionModal?.onConfirm || actionModal.busy) {
+      return;
+    }
+
+    const { onConfirm, title } = actionModal;
+    setActionModal({ ...actionModal, busy: true });
+
+    try {
+      const message = await onConfirm();
+      setActionModal({
+        type: "result",
+        title: `${title} Complete`,
+        message,
+        resultType: "success",
+      });
+    } catch (error) {
+      console.log(`${title} error:`, error);
+      setActionModal({
+        type: "result",
+        title: `${title} Failed`,
+        message:
+          error instanceof Error
+            ? error.message
+            : "The request could not be completed. Please try again.",
+        resultType: "error",
+      });
+    }
+  };
+
+  const getCustomerApplianceUsage = (customerId: string) => {
+    return customerAppliances
+      .filter((appliance) => appliance.customerId === customerId)
+      .reduce(
+        (usage, appliance) => {
+          const savedKwh = Number(appliance.totalKwh || 0);
+          if (appliance.status !== "on" || !appliance.turnedOnAt) {
+            return {
+              kwh: usage.kwh + savedKwh,
+              count: usage.count + 1,
+              onCount: usage.onCount,
+            };
+          }
+
+          let turnedOnAt = 0;
+          try {
+            if (typeof appliance.turnedOnAt.toMillis === "function") {
+              turnedOnAt = appliance.turnedOnAt.toMillis();
+            } else if (appliance.turnedOnAt instanceof Date) {
+              turnedOnAt = appliance.turnedOnAt.getTime();
+            } else if (typeof appliance.turnedOnAt === "number") {
+              turnedOnAt = appliance.turnedOnAt;
+            }
+          } catch (error) {
+            console.log("Unable to read appliance start time:", error);
+          }
+
+          const liveKwh =
+            savedKwh +
+            (turnedOnAt
+              ? (appliance.wattage / 1000) *
+                (Math.max(energyClock - turnedOnAt, 0) /
+                  (1000 * 60 * 60))
+              : 0);
+
+          return {
+            kwh: usage.kwh + liveKwh,
+            count: usage.count + 1,
+            onCount: usage.onCount + 1,
+          };
+        },
+        { kwh: 0, count: 0, onCount: 0 }
+      );
+  };
 
   const formatDate = (value: any) => {
     if (!value) {
@@ -161,7 +331,11 @@ export default function FieldStaffScreen() {
   const handlePassInspection = async (
     application: Application
   ) => {
-    try {
+    requestAction(
+      "Pass Inspection",
+      `Mark ${application.fullName}'s inspection as passed?`,
+      "Pass Inspection",
+      async () => {
       await updateDoc(doc(db, "applications", application.id), {
         status: "inspection_passed",
         inspectionResult: "passed",
@@ -171,50 +345,42 @@ export default function FieldStaffScreen() {
         updatedAt: new Date(),
       });
 
-      Alert.alert(
-        "Inspection Passed",
-        `${application.fullName}'s site inspection has been marked as passed.`
-      );
-    } catch (error) {
-      console.log("Pass inspection error:", error);
-
-      Alert.alert(
-        "Error",
-        "Unable to update the inspection result."
-      );
-    }
+      return `${application.fullName}'s site inspection has been marked as passed.`;
+      }
+    );
   };
 
   const handleReinspect = async (
     application: Application
   ) => {
-    try {
+    requestAction(
+      "Request Re-Inspection",
+      `Return ${application.fullName}'s application for another inspection?`,
+      "Re-Inspect",
+      async () => {
+      const inspectedAt = new Date();
       await updateDoc(doc(db, "applications", application.id), {
         status: "reinspect",
         inspectionResult: "reinspect",
         inspectionNotes:
           "Site requires corrections and another inspection before installation.",
-        updatedAt: new Date(),
+        inspectedAt,
+        updatedAt: inspectedAt,
       });
 
-      Alert.alert(
-        "Re-Inspection Required",
-        `${application.fullName}'s application has been returned for re-inspection.`
-      );
-    } catch (error) {
-      console.log("Reinspection error:", error);
-
-      Alert.alert(
-        "Error",
-        "Unable to update the application."
-      );
-    }
+      return `${application.fullName}'s application has been returned for re-inspection.`;
+      }
+    );
   };
 
   const handleRejectInspection = async (
     application: Application
   ) => {
-    try {
+    requestAction(
+      "Reject Inspection",
+      `Reject ${application.fullName}'s site inspection?`,
+      "Reject",
+      async () => {
       await updateDoc(doc(db, "applications", application.id), {
         status: "inspection_rejected",
         inspectionResult: "rejected",
@@ -226,54 +392,41 @@ export default function FieldStaffScreen() {
         updatedAt: new Date(),
       });
 
-      Alert.alert(
-        "Inspection Rejected",
-        `${application.fullName}'s site inspection has been rejected.`
-      );
-    } catch (error) {
-      console.log("Reject inspection error:", error);
-
-      Alert.alert(
-        "Error",
-        "Unable to update the inspection result."
-      );
-    }
+      return `${application.fullName}'s site inspection has been rejected.`;
+      }
+    );
   };
 
   const handleInstallMeter = async (
     application: Application
   ) => {
-    try {
+    requestAction(
+      "Install Meter",
+      `Record meter installation for ${application.fullName}? An administrator will activate the service separately.`,
+      "Install Meter",
+      async () => {
       const meterNumber = generateMeterNumber();
+      const installedAt = new Date();
 
       await updateDoc(doc(db, "applications", application.id), {
-        status: "active",
+        status: "meter_installed",
         meterNumber,
-        meterStatus: "active",
-        installedAt: new Date(),
+        meterStatus: "installed",
+        installedAt,
 
         previousReading: 0,
         currentReading: 0,
         consumption: 0,
         readingRate: ELECTRICITY_RATE,
         estimatedBill: 0,
-        readingUpdatedAt: new Date(),
+        readingUpdatedAt: installedAt,
 
-        updatedAt: new Date(),
+        updatedAt: installedAt,
       });
 
-      Alert.alert(
-        "Meter Installed",
-        `Meter ${meterNumber} has been installed and the electricity service is now active.`
-      );
-    } catch (error) {
-      console.log("Install meter error:", error);
-
-      Alert.alert(
-        "Installation Error",
-        "Unable to install the meter. Please try again."
-      );
-    }
+      return `Meter ${meterNumber} has been installed. The application is awaiting administrator activation.`;
+      }
+    );
   };
 
   const handleSaveReading = async (
@@ -282,51 +435,59 @@ export default function FieldStaffScreen() {
     const inputValue = readingInputs[application.id]?.trim();
 
     if (!inputValue) {
-      Alert.alert(
-        "Reading Required",
-        "Please enter the new meter reading."
-      );
-
+      setActionModal({
+        type: "result",
+        title: "Reading Required",
+        message: "Please enter the new meter reading.",
+        resultType: "error",
+      });
       return;
     }
 
     const newReading = Number(inputValue);
 
     if (!Number.isFinite(newReading)) {
-      Alert.alert(
-        "Invalid Reading",
-        "Please enter a valid numeric meter reading."
-      );
-
+      setActionModal({
+        type: "result",
+        title: "Invalid Reading",
+        message: "Please enter a valid numeric meter reading.",
+        resultType: "error",
+      });
       return;
     }
 
     if (newReading < 0) {
-      Alert.alert(
-        "Invalid Reading",
-        "Meter reading cannot be negative."
-      );
-
+      setActionModal({
+        type: "result",
+        title: "Invalid Reading",
+        message: "Meter reading cannot be negative.",
+        resultType: "error",
+      });
       return;
     }
 
     const previousReading = application.currentReading ?? 0;
 
     if (newReading < previousReading) {
-      Alert.alert(
-        "Invalid Reading",
-        `The new reading (${newReading} kWh) cannot be lower than the previous reading (${previousReading} kWh).`
-      );
-
+      setActionModal({
+        type: "result",
+        title: "Invalid Reading",
+        message: `The new reading (${newReading} kWh) cannot be lower than the previous reading (${previousReading} kWh).`,
+        resultType: "error",
+      });
       return;
     }
 
     const consumption = newReading - previousReading;
     const estimatedBill = consumption * ELECTRICITY_RATE;
 
-    setSavingReadingId(application.id);
-
-    try {
+    requestAction(
+      "Save Meter Reading",
+      `Save ${newReading.toFixed(2)} kWh as ${application.fullName}'s latest meter reading?`,
+      "Save Reading",
+      async () => {
+      setSavingReadingId(application.id);
+      try {
       console.log("Saving simulated meter reading:", {
         applicationId: application.id,
         meterNumber: application.meterNumber,
@@ -371,26 +532,18 @@ export default function FieldStaffScreen() {
         [application.id]: "",
       }));
 
-      Alert.alert(
-        "Reading Saved",
-        `Meter reading saved successfully.\n\nPrevious: ${previousReading.toFixed(
+      return `Meter reading saved successfully.\n\nPrevious: ${previousReading.toFixed(
           2
         )} kWh\nCurrent: ${newReading.toFixed(
           2
         )} kWh\nConsumption: ${consumption.toFixed(
           2
-        )} kWh\nEstimated Bill: ${formatCurrency(estimatedBill)}`
-      );
-    } catch (error) {
-      console.log("Save reading error:", error);
-
-      Alert.alert(
-        "Save Error",
-        "Unable to save the meter reading. Please check your Firebase connection and try again."
-      );
-    } finally {
-      setSavingReadingId(null);
-    }
+        )} kWh\nEstimated Bill: ${formatCurrency(estimatedBill)}`;
+      } finally {
+        setSavingReadingId(null);
+      }
+      }
+    );
   };
 
   const handleLogout = async () => {
@@ -538,7 +691,26 @@ export default function FieldStaffScreen() {
               key={application.id}
               style={styles.applicationCard}
             >
-              <View style={styles.applicationHeader}>
+            <TouchableOpacity
+              style={styles.applicationIdDropdown}
+              onPress={() => toggleApplicationExpanded(application.id)}
+              accessibilityRole="button"
+              accessibilityLabel={`Application ${application.id}, ${
+                expandedApplicationIds.has(application.id)
+                  ? "collapse"
+                  : "expand"
+              } details`}
+            >
+              <Text style={styles.applicationIdText}>
+                APPLICATION ID: {application.id}
+              </Text>
+              <Text style={styles.dropdownIndicator}>
+                {expandedApplicationIds.has(application.id) ? "−" : "+"}
+              </Text>
+            </TouchableOpacity>
+            {expandedApplicationIds.has(application.id) && (
+              <>
+            <View style={styles.applicationHeader}>
                 <View style={styles.applicationHeaderText}>
                   <Text style={styles.customerName}>
                     {application.fullName}
@@ -624,6 +796,8 @@ export default function FieldStaffScreen() {
                   </Text>
                 </TouchableOpacity>
               </View>
+                </>
+              )}
             </View>
           ))
         )}
@@ -656,6 +830,25 @@ export default function FieldStaffScreen() {
               key={application.id}
               style={styles.installCard}
             >
+              <TouchableOpacity
+                style={styles.applicationIdDropdown}
+                onPress={() => toggleApplicationExpanded(application.id)}
+                accessibilityRole="button"
+                accessibilityLabel={`Application ${application.id}, ${
+                  expandedApplicationIds.has(application.id)
+                    ? "collapse"
+                    : "expand"
+                } details`}
+              >
+                <Text style={styles.applicationIdText}>
+                  APPLICATION ID: {application.id}
+                </Text>
+                <Text style={styles.dropdownIndicator}>
+                  {expandedApplicationIds.has(application.id) ? "−" : "+"}
+                </Text>
+              </TouchableOpacity>
+              {expandedApplicationIds.has(application.id) && (
+                <>
               <View style={styles.applicationHeader}>
                 <View style={styles.applicationHeaderText}>
                   <Text style={styles.customerName}>
@@ -707,9 +900,11 @@ export default function FieldStaffScreen() {
                 }
               >
                 <Text style={styles.installButtonText}>
-                  INSTALL METER & ACTIVATE SERVICE
+                  INSTALL METER
                 </Text>
               </TouchableOpacity>
+                </>
+              )}
             </View>
           ))
         )}
@@ -751,12 +946,34 @@ export default function FieldStaffScreen() {
 
             const isSaving =
               savingReadingId === application.id;
+            const applianceUsage = getCustomerApplianceUsage(
+              application.customerId
+            );
 
             return (
               <View
                 key={application.id}
                 style={styles.activeMeterCard}
               >
+                <TouchableOpacity
+                  style={styles.applicationIdDropdown}
+                  onPress={() => toggleApplicationExpanded(application.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Application ${application.id}, ${
+                    expandedApplicationIds.has(application.id)
+                      ? "collapse"
+                      : "expand"
+                  } details`}
+                >
+                  <Text style={styles.applicationIdText}>
+                    APPLICATION ID: {application.id}
+                  </Text>
+                  <Text style={styles.dropdownIndicator}>
+                    {expandedApplicationIds.has(application.id) ? "−" : "+"}
+                  </Text>
+                </TouchableOpacity>
+                {expandedApplicationIds.has(application.id) && (
+                  <>
                 {/* METER HEADER */}
                 <View style={styles.meterHeader}>
                   <View style={styles.meterHeaderText}>
@@ -781,6 +998,23 @@ export default function FieldStaffScreen() {
                 </View>
 
                 <View style={styles.applicationDivider} />
+
+                <View style={styles.applianceUsageBox}>
+                  <Text style={styles.applianceUsageTitle}>
+                    CUSTOMER APPLIANCE USAGE
+                  </Text>
+                  <Text style={styles.applianceUsageValue}>
+                    {applianceUsage.kwh.toFixed(3)} kWh
+                  </Text>
+                  <Text style={styles.applianceUsageDetail}>
+                    {applianceUsage.count} appliance
+                    {applianceUsage.count !== 1 ? "s" : ""} ·{" "}
+                    {applianceUsage.onCount} currently on
+                  </Text>
+                  <Text style={styles.applianceUsageDetail}>
+                    Updates live from the customer appliance simulator.
+                  </Text>
+                </View>
 
                 {/* METER INFORMATION */}
                 <View style={styles.detailRow}>
@@ -952,6 +1186,8 @@ export default function FieldStaffScreen() {
                     )}
                   </Text>
                 )}
+                  </>
+                )}
               </View>
             );
           })
@@ -989,6 +1225,64 @@ export default function FieldStaffScreen() {
           PELCO Electricity Management System
         </Text>
       </ScrollView>
+      <Modal
+        visible={actionModal !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!actionModal?.busy) {
+            setActionModal(null);
+          }
+        }}
+      >
+        <View style={styles.actionModalOverlay}>
+          <View style={styles.actionModalCard}>
+            <Text style={styles.actionModalTitle}>
+              {actionModal?.title}
+            </Text>
+            <Text style={styles.actionModalMessage}>
+              {actionModal?.message}
+            </Text>
+            <View style={styles.actionModalButtons}>
+              {actionModal?.type === "confirm" && (
+                <TouchableOpacity
+                  style={styles.actionCancelButton}
+                  onPress={() => setActionModal(null)}
+                  disabled={actionModal.busy}
+                >
+                  <Text style={styles.actionCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={[
+                  styles.actionPrimaryButton,
+                  actionModal?.type === "result" &&
+                    actionModal.resultType === "error" &&
+                    styles.actionErrorButton,
+                ]}
+                onPress={() => {
+                  if (actionModal?.type === "confirm") {
+                    void confirmAction();
+                  } else {
+                    setActionModal(null);
+                  }
+                }}
+                disabled={actionModal?.busy}
+              >
+                {actionModal?.busy ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <Text style={styles.actionPrimaryText}>
+                    {actionModal?.type === "confirm"
+                      ? actionModal.actionLabel
+                      : "Close"}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1149,6 +1443,130 @@ const styles = StyleSheet.create({
     borderColor: "#cfe3d4",
   },
 
+  applicationIdDropdown: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderRadius: 9,
+    backgroundColor: "#f1f8f3",
+    paddingHorizontal: 11,
+    marginBottom: 12,
+  },
+
+  applicationIdText: {
+    flex: 1,
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  dropdownIndicator: {
+    color: "#176b3a",
+    fontSize: 22,
+    fontWeight: "700",
+  },
+
+  applianceUsageBox: {
+    backgroundColor: "#f1f8f3",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 12,
+  },
+
+  applianceUsageTitle: {
+    color: "#176b3a",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+
+  applianceUsageValue: {
+    color: "#123d25",
+    fontSize: 22,
+    fontWeight: "900",
+    marginTop: 5,
+  },
+
+  applianceUsageDetail: {
+    color: "#708078",
+    fontSize: 11,
+    marginTop: 4,
+  },
+
+  actionModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+
+  actionModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    padding: 24,
+    backgroundColor: "#ffffff",
+  },
+
+  actionModalTitle: {
+    color: "#176b3a",
+    fontSize: 20,
+    fontWeight: "800",
+    textAlign: "center",
+    marginBottom: 12,
+  },
+
+  actionModalMessage: {
+    color: "#34443a",
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+
+  actionModalButtons: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 24,
+  },
+
+  actionCancelButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+  },
+
+  actionCancelText: {
+    color: "#34443a",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  actionPrimaryButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "#176b3a",
+  },
+
+  actionErrorButton: {
+    backgroundColor: "#b3261e",
+  },
+
+  actionPrimaryText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
+    textAlign: "center",
+  },
   applicationHeader: {
     flexDirection: "row",
     justifyContent: "space-between",

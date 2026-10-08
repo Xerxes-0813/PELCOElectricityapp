@@ -4,8 +4,8 @@ import { doc, getDoc } from "firebase/firestore";
 import { useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -20,16 +20,28 @@ import { auth, db } from "../../config/firebase";
 export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [modalType, setModalType] = useState<
+    "confirm" | "success" | "error" | null
+  >(null);
+  const [modalMessage, setModalMessage] = useState("");
+  const [destination, setDestination] = useState<
+    "admin" | "field-staff" | "customer" | null
+  >(null);
 
-  const handleLogin = async () => {
+  const handleLogin = () => {
     if (!email.trim() || !password.trim()) {
-      Alert.alert(
-        "Missing Information",
-        "Please enter your email and password."
-      );
+      setModalMessage("Please enter your email and password.");
+      setModalType("error");
       return;
     }
+
+    setModalType("confirm");
+  };
+
+  const submitLogin = async () => {
+    setModalType(null);
 
     try {
       setLoading(true);
@@ -47,31 +59,44 @@ export default function LoginScreen() {
 
       if (!userDoc.exists()) {
         await auth.signOut();
-
-        Alert.alert(
-          "Account Setup Error",
+        setModalMessage(
           "Your account does not have a user profile yet."
         );
-
+        setModalType("error");
         return;
       }
 
       const userData = userDoc.data();
       const role = userData.role;
+      const accountStatus = String(userData.status || "active").toLowerCase();
 
-      if (role === "admin") {
-        router.replace("../admin");
-      } else if (role === "field-staff") {
-        router.replace("../field-staff");
-      } else if (role === "customer") {
-        router.replace("../customer");
+      if (
+        accountStatus === "inactive" ||
+        accountStatus === "disabled" ||
+        accountStatus === "deactivated"
+      ) {
+        await auth.signOut();
+        setModalMessage(
+          "Your account has been disabled. Please contact an administrator."
+        );
+        setModalType("error");
+        return;
+      }
+
+      if (
+        role === "admin" ||
+        role === "field-staff" ||
+        role === "customer"
+      ) {
+        setDestination(role);
+        setModalMessage("You have signed in successfully.");
+        setModalType("success");
       } else {
         await auth.signOut();
-
-        Alert.alert(
-          "Invalid Role",
+        setModalMessage(
           "Your account does not have a valid system role."
         );
+        setModalType("error");
       }
     } catch (error: any) {
       console.log("Login error:", error);
@@ -90,7 +115,8 @@ export default function LoginScreen() {
         message = "Too many login attempts. Please try again later.";
       }
 
-      Alert.alert("Login Failed", message);
+      setModalMessage(message);
+      setModalType("error");
     } finally {
       setLoading(false);
     }
@@ -139,14 +165,30 @@ export default function LoginScreen() {
 
           <Text style={styles.label}>Password</Text>
 
-          <TextInput
-            style={styles.input}
-            placeholder="Enter your password"
-            placeholderTextColor="#8a8a8a"
-            secureTextEntry
-            value={password}
-            onChangeText={setPassword}
-          />
+          <View style={styles.passwordInputContainer}>
+            <TextInput
+              style={styles.passwordInput}
+              placeholder="Enter your password"
+              placeholderTextColor="#8a8a8a"
+              secureTextEntry={!showPassword}
+              value={password}
+              onChangeText={setPassword}
+              editable={!loading}
+            />
+            <TouchableOpacity
+              style={styles.visibilityButton}
+              onPress={() => setShowPassword(!showPassword)}
+              accessibilityRole="button"
+              accessibilityLabel={
+                showPassword ? "Hide password" : "Show password"
+              }
+              disabled={loading}
+            >
+              <Text style={styles.visibilityButtonText}>
+                {showPassword ? "Hide" : "Show"}
+              </Text>
+            </TouchableOpacity>
+          </View>
 
           <TouchableOpacity
             style={[
@@ -196,6 +238,74 @@ export default function LoginScreen() {
           PELCO Smart Electricity Management System
         </Text>
       </ScrollView>
+      <Modal
+        visible={modalType !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setModalType(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              {modalType === "confirm"
+                ? "Confirm Login"
+                : modalType === "success"
+                  ? "Login Successful"
+                  : "Login Failed"}
+            </Text>
+            <Text style={styles.modalMessage}>
+              {modalType === "confirm"
+                ? `Sign in with ${email.trim()}?`
+                : modalMessage}
+            </Text>
+            <View style={styles.modalActions}>
+              {modalType === "confirm" ? (
+                <>
+                  <TouchableOpacity
+                    style={[styles.modalButton, styles.modalCancelButton]}
+                    onPress={() => setModalType(null)}
+                    disabled={loading}
+                  >
+                    <Text style={styles.modalCancelButtonText}>
+                      Cancel
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalButton, styles.modalPrimaryButton]}
+                    onPress={submitLogin}
+                    disabled={loading}
+                  >
+                    <Text style={styles.modalPrimaryButtonText}>
+                      Continue
+                    </Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.modalPrimaryButton]}
+                  onPress={() => {
+                    const nextDestination = destination;
+                    setModalType(null);
+                    setDestination(null);
+
+                    if (nextDestination === "admin") {
+                      router.replace("../admin");
+                    } else if (nextDestination === "field-staff") {
+                      router.replace("../field-staff");
+                    } else if (nextDestination === "customer") {
+                      router.replace("../customer");
+                    }
+                  }}
+                >
+                  <Text style={styles.modalPrimaryButtonText}>
+                    {modalType === "success" ? "Continue" : "Close"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -289,6 +399,107 @@ const styles = StyleSheet.create({
     color: "#1c2b21",
     backgroundColor: "#f9fcfa",
     marginBottom: 18,
+  },
+
+  passwordInputContainer: {
+    height: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6e3d9",
+    borderRadius: 12,
+    paddingLeft: 15,
+    paddingRight: 10,
+    backgroundColor: "#f9fcfa",
+    marginBottom: 18,
+  },
+
+  passwordInput: {
+    flex: 1,
+    height: "100%",
+    padding: 0,
+    fontSize: 15,
+    color: "#1c2b21",
+  },
+
+  visibilityButton: {
+    paddingHorizontal: 5,
+    paddingVertical: 10,
+  },
+
+  visibilityButtonText: {
+    color: "#176b3a",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  modalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
+
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    padding: 24,
+    backgroundColor: "#ffffff",
+  },
+
+  modalTitle: {
+    marginBottom: 12,
+    color: "#176b3a",
+    fontSize: 20,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  modalMessage: {
+    color: "#34443a",
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center",
+  },
+
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 10,
+    marginTop: 24,
+  },
+
+  modalButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+  },
+
+  modalCancelButton: {
+    borderWidth: 1,
+    borderColor: "#d6e3d9",
+  },
+
+  modalCancelButtonText: {
+    color: "#344238",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  modalPrimaryButton: {
+    backgroundColor: "#176b3a",
+  },
+
+  modalPrimaryButtonText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   loginButton: {

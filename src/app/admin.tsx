@@ -2,6 +2,7 @@ import { router } from "expo-router";
 import { signOut } from "firebase/auth";
 import {
   collection,
+  deleteDoc,
   doc,
   onSnapshot,
   orderBy,
@@ -12,6 +13,7 @@ import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -32,11 +34,15 @@ type Application = {
   status: string;
   rejectionReason?: string;
   submittedAt?: any;
+  reviewedAt?: any;
+  approvedAt?: any;
+  inspectedAt?: any;
   updatedAt?: any;
 
   meterNumber?: string;
   meterStatus?: string;
   installedAt?: any;
+  activatedAt?: any;
 
   previousReading?: number;
   currentReading?: number;
@@ -59,9 +65,34 @@ type Appliance = {
   updatedAt?: any;
 };
 
+type ManagedUser = {
+  id: string;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+  email?: string;
+  phoneNumber?: string;
+  role: string;
+  status?: string;
+};
+
+type ActionModalState = {
+  type: "confirm" | "result";
+  title: string;
+  message: string;
+  actionLabel?: string;
+  resultType?: "success" | "error";
+  busy?: boolean;
+  onConfirm?: () => Promise<string>;
+};
+
 export default function AdminScreen() {
   const [applications, setApplications] = useState<Application[]>([]);
   const [appliances, setAppliances] = useState<Appliance[]>([]);
+  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(true);
+  const [userManagementExpanded, setUserManagementExpanded] =
+    useState(false);
 
   const [loadingApplications, setLoadingApplications] =
     useState(true);
@@ -73,6 +104,49 @@ export default function AdminScreen() {
     useState<string | null>(null);
 
   const [loggingOut, setLoggingOut] = useState(false);
+  const [expandedApplicationIds, setExpandedApplicationIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [actionModal, setActionModal] = useState<ActionModalState | null>(
+    null
+  );
+
+  useEffect(() => {
+    const usersQuery = query(collection(db, "users"));
+
+    const unsubscribe = onSnapshot(
+      usersQuery,
+      (snapshot) => {
+        const userList: ManagedUser[] = snapshot.docs.map((document) => {
+          const data = document.data();
+
+          return {
+            id: document.id,
+            firstName: data.firstName,
+            lastName: data.lastName,
+            name: data.name,
+            email: data.email,
+            phoneNumber: data.phoneNumber,
+            role: String(data.role || ""),
+            status: data.status,
+          };
+        });
+
+        setManagedUsers(userList);
+        setLoadingUsers(false);
+      },
+      (error) => {
+        console.log("Admin users loading error:", error);
+        setLoadingUsers(false);
+        Alert.alert(
+          "Unable to Load Users",
+          error.message || "Something went wrong while loading users."
+        );
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
 
   /*
    * LIVE CLOCK
@@ -392,6 +466,65 @@ export default function AdminScreen() {
    */
   const electricityRate = 12;
 
+  const toggleApplicationExpanded = (applicationId: string) => {
+    setExpandedApplicationIds((current) => {
+      const next = new Set(current);
+      if (next.has(applicationId)) {
+        next.delete(applicationId);
+      } else {
+        next.add(applicationId);
+      }
+      return next;
+    });
+  };
+
+  const requestAction = (
+    title: string,
+    message: string,
+    actionLabel: string,
+    onConfirm: () => Promise<string>
+  ) => {
+    setActionModal({
+      type: "confirm",
+      title,
+      message,
+      actionLabel,
+      onConfirm,
+    });
+  };
+
+  const confirmAction = async () => {
+    if (!actionModal?.onConfirm || actionModal.busy) {
+      return;
+    }
+
+    const { onConfirm, title } = actionModal;
+    setActionModal({ ...actionModal, busy: true });
+
+    try {
+      const message = await onConfirm();
+      setActionModal({
+        type: "result",
+        title: `${title} Complete`,
+        message,
+        resultType: "success",
+      });
+    } catch (error) {
+      console.log(`${title} error:`, error);
+      setActionModal({
+        type: "result",
+        title: `${title} Failed`,
+        message:
+          error instanceof Error
+            ? error.message
+            : "The request could not be completed. Please try again.",
+        resultType: "error",
+      });
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
   /*
    * ---------------------------------------------------------
    * APPROVE APPLICATION
@@ -400,48 +533,22 @@ export default function AdminScreen() {
   const handleApprove = async (
     application: Application
   ) => {
-    try {
-      setProcessingId(application.id);
-
-      console.log(
-        "Approving application:",
-        application.id
-      );
-
-      await updateDoc(
-        doc(
-          db,
-          "applications",
-          application.id
-        ),
-        {
+    requestAction(
+      "Approve Application",
+      `Approve ${application.fullName}'s application and send it to site inspection?`,
+      "Approve",
+      async () => {
+        setProcessingId(application.id);
+        const reviewedAt = new Date();
+        await updateDoc(doc(db, "applications", application.id), {
           status: "approved",
-          updatedAt: new Date(),
-        }
-      );
-
-      console.log("Application approved.");
-
-      setProcessingId(null);
-
-      Alert.alert(
-        "Application Approved",
-        `${application.fullName}'s application has been approved.\n\nThe application is now ready for site inspection.`
-      );
-    } catch (error: any) {
-      console.log(
-        "Approve application error:",
-        error
-      );
-
-      setProcessingId(null);
-
-      Alert.alert(
-        "Approval Failed",
-        error?.message ||
-          "Unable to approve the application."
-      );
-    }
+          reviewedAt,
+          approvedAt: reviewedAt,
+          updatedAt: reviewedAt,
+        });
+        return `${application.fullName}'s application has been approved and is ready for site inspection.`;
+      }
+    );
   };
 
   /*
@@ -452,67 +559,103 @@ export default function AdminScreen() {
   const handleReject = async (
     application: Application
   ) => {
-    Alert.alert(
+    requestAction(
       "Reject Application",
-      `Are you sure you want to reject ${application.fullName}'s application?`,
-      [
-        {
-          text: "Cancel",
-          style: "cancel",
-        },
-        {
-          text: "Reject",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              setProcessingId(application.id);
+      `Reject ${application.fullName}'s application?`,
+      "Reject",
+      async () => {
+        setProcessingId(application.id);
+        const reviewedAt = new Date();
+        await updateDoc(doc(db, "applications", application.id), {
+          status: "rejected",
+          rejectionReason:
+            "Application was rejected by the PELCO administrator.",
+          reviewedAt,
+          updatedAt: reviewedAt,
+        });
+        return `${application.fullName}'s application has been rejected.`;
+      }
+    );
+  };
 
-              console.log(
-                "Rejecting application:",
-                application.id
-              );
+  const handleActivateService = async (
+    application: Application
+  ) => {
+    requestAction(
+      "Activate Service",
+      `Activate electricity service for ${application.fullName}?`,
+      "Activate Service",
+      async () => {
+        setProcessingId(application.id);
+        const activatedAt = new Date();
+        await updateDoc(doc(db, "applications", application.id), {
+          status: "active",
+          meterStatus: "active",
+          activatedAt,
+          updatedAt: activatedAt,
+        });
+        return `${application.fullName}'s electricity service has been activated.`;
+      }
+    );
+  };
 
-              await updateDoc(
-                doc(
-                  db,
-                  "applications",
-                  application.id
-                ),
-                {
-                  status: "rejected",
-                  rejectionReason:
-                    "Application was rejected by the PELCO administrator.",
-                  updatedAt: new Date(),
-                }
-              );
+  const isManagedUserActive = (user: ManagedUser) => {
+    const status = user.status?.toLowerCase();
+    return !["inactive", "disabled", "deactivated"].includes(status || "");
+  };
 
-              console.log(
-                "Application rejected."
-              );
+  const getManagedUserName = (user: ManagedUser) =>
+    user.name ||
+    [user.firstName, user.lastName].filter(Boolean).join(" ") ||
+    user.email ||
+    "Unnamed user";
 
-              setProcessingId(null);
+  const handleUserStatusChange = (user: ManagedUser) => {
+    const currentlyActive = isManagedUserActive(user);
+    const nextStatus = currentlyActive ? "inactive" : "active";
+    const action = currentlyActive ? "Disable" : "Reactivate";
+    const name = getManagedUserName(user);
 
-              Alert.alert(
-                "Application Rejected",
-                `${application.fullName}'s application has been rejected.`
-              );
-            } catch (error: any) {
-              console.log(
-                "Reject application error:",
-                error
-              );
+    requestAction(
+      `${action} User`,
+      `${action} ${name}'s account?`,
+      action,
+      async () => {
+        await updateDoc(doc(db, "users", user.id), {
+          status: nextStatus,
+          updatedAt: new Date(),
+        });
+        return `${name}'s account has been ${currentlyActive ? "disabled" : "reactivated"}.`;
+      }
+    );
+  };
 
-              setProcessingId(null);
+  const handleUserDelete = (user: ManagedUser) => {
+    const name = getManagedUserName(user);
 
-              Alert.alert(
-                "Rejection Failed",
-                error?.message ||
-                  "Unable to reject the application."
-              );
-            }
-          },
-        },
-      ]
+    requestAction(
+      "Delete User Profile",
+      `Delete ${name}'s user profile? This removes the Firestore profile. It does not delete the Firebase Authentication account.`,
+      "Delete Profile",
+      async () => {
+        await deleteDoc(doc(db, "users", user.id));
+        return `${name}'s Firestore profile has been deleted. The Firebase Authentication account remains.`;
+      }
+    );
+  };
+
+  const handleApplicationDelete = (
+    application: Application
+  ) => {
+    requestAction(
+      "Delete Application",
+      `Permanently delete ${application.fullName}'s connection application? This cannot be undone.`,
+      "Delete Application",
+      async () => {
+        setProcessingId(application.id);
+        await deleteDoc(doc(db, "applications", application.id));
+        return `${application.fullName}'s connection application has been deleted.`;
+      }
     );
   };
 
@@ -583,6 +726,94 @@ export default function AdminScreen() {
       }
     );
 
+  const customerUsers = managedUsers.filter(
+    (user) => user.role.toLowerCase() === "customer"
+  );
+  const staffUsers = managedUsers.filter(
+    (user) =>
+      user.role.toLowerCase() === "staff" ||
+      user.role.toLowerCase() === "field-staff"
+  );
+  const administratorUsers = managedUsers.filter(
+    (user) =>
+      user.role.toLowerCase() === "admin" ||
+      user.role.toLowerCase() === "administrator"
+  );
+
+  const renderUserGroup = (title: string, users: ManagedUser[]) => (
+    <View style={styles.userGroup} key={title}>
+      <View style={styles.userGroupHeader}>
+        <Text style={styles.userGroupTitle}>{title}</Text>
+        <Text style={styles.userGroupCount}>{users.length}</Text>
+      </View>
+      {users.length === 0 ? (
+        <Text style={styles.emptyUsersText}>No {title.toLowerCase()} found.</Text>
+      ) : (
+        users.map((user) => {
+          const active = isManagedUserActive(user);
+          const isCurrentUser = user.id === auth.currentUser?.uid;
+
+          return (
+            <View style={styles.userCard} key={user.id}>
+              <View style={styles.userDetails}>
+                <View style={styles.userNameRow}>
+                  <Text style={styles.userName}>
+                    {getManagedUserName(user)}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.userStatusBadge,
+                      active
+                        ? styles.userActiveBadge
+                        : styles.userInactiveBadge,
+                    ]}
+                  >
+                    {active ? "ACTIVE" : "DISABLED"}
+                  </Text>
+                </View>
+                <Text style={styles.userEmail}>
+                  {user.email || "No email available"}
+                </Text>
+                {user.phoneNumber ? (
+                  <Text style={styles.userPhone}>{user.phoneNumber}</Text>
+                ) : null}
+              </View>
+              <View style={styles.userActions}>
+                <TouchableOpacity
+                  style={[
+                    styles.userStatusButton,
+                    isCurrentUser && styles.userActionDisabled,
+                  ]}
+                  onPress={() => handleUserStatusChange(user)}
+                  disabled={isCurrentUser}
+                >
+                  <Text style={styles.userStatusButtonText}>
+                    {active ? "Disable" : "Reactivate"}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.userDeleteButton,
+                    isCurrentUser && styles.userActionDisabled,
+                  ]}
+                  onPress={() => handleUserDelete(user)}
+                  disabled={isCurrentUser}
+                >
+                  <Text style={styles.userDeleteButtonText}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+              {isCurrentUser ? (
+                <Text style={styles.currentUserNote}>
+                  You cannot change your own account.
+                </Text>
+              ) : null}
+            </View>
+          );
+        })
+      )}
+    </View>
+  );
+
   /*
    * ---------------------------------------------------------
    * FORMAT DATE
@@ -608,6 +839,32 @@ export default function AdminScreen() {
       );
     } catch {
       return "Recently submitted";
+    }
+  };
+
+  const formatDateTime = (timestamp: any) => {
+    if (!timestamp) {
+      return "Not recorded";
+    }
+
+    try {
+      const date = timestamp.toDate
+        ? timestamp.toDate()
+        : new Date(timestamp);
+
+      if (Number.isNaN(date.getTime())) {
+        return "Not recorded";
+      }
+
+      return date.toLocaleString("en-PH", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+    } catch {
+      return "Not recorded";
     }
   };
 
@@ -650,6 +907,42 @@ export default function AdminScreen() {
             consumption.
           </Text>
         </View>
+
+        <TouchableOpacity
+          style={styles.userManagementButton}
+          onPress={() => setUserManagementExpanded((expanded) => !expanded)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: userManagementExpanded }}
+        >
+          <View>
+            <Text style={styles.userManagementButtonTitle}>
+              User Management
+            </Text>
+            <Text style={styles.userManagementButtonSubtitle}>
+              View and manage customer, staff, and administrator accounts
+            </Text>
+          </View>
+          <Text style={styles.userManagementButtonIcon}>
+            {userManagementExpanded ? "−" : "+"}
+          </Text>
+        </TouchableOpacity>
+
+        {userManagementExpanded ? (
+          <View style={styles.userManagementCard}>
+            {loadingUsers ? (
+              <View style={styles.loadingUsers}>
+                <ActivityIndicator color="#176b3a" />
+                <Text style={styles.emptyUsersText}>Loading users...</Text>
+              </View>
+            ) : (
+              <>
+                {renderUserGroup("Customers", customerUsers)}
+                {renderUserGroup("Staff", staffUsers)}
+                {renderUserGroup("Administrators", administratorUsers)}
+              </>
+            )}
+          </View>
+        ) : null}
 
         {/* STATISTICS */}
         <View style={styles.statsRow}>
@@ -782,6 +1075,29 @@ export default function AdminScreen() {
                       styles.activeMeterCard
                     }
                   >
+                    <TouchableOpacity
+                      style={styles.applicationIdDropdown}
+                      onPress={() =>
+                        toggleApplicationExpanded(application.id)
+                      }
+                      accessibilityRole="button"
+                      accessibilityLabel={`Application ${application.id}, ${
+                        expandedApplicationIds.has(application.id)
+                          ? "collapse"
+                          : "expand"
+                      } details`}
+                    >
+                      <Text style={styles.applicationIdText}>
+                        APPLICATION ID: {application.id}
+                      </Text>
+                      <Text style={styles.dropdownIndicator}>
+                        {expandedApplicationIds.has(application.id)
+                          ? "−"
+                          : "+"}
+                      </Text>
+                    </TouchableOpacity>
+                    {expandedApplicationIds.has(application.id) && (
+                      <>
                     {/* CUSTOMER HEADER */}
                     <View
                       style={
@@ -1122,7 +1438,9 @@ export default function AdminScreen() {
                         </View>
                       </View>
                     </View>
-                  </View>
+                        </>
+                      )}
+                      </View>
                 );
               }
             )}
@@ -1136,7 +1454,7 @@ export default function AdminScreen() {
           <Text
             style={styles.sectionTitle}
           >
-            New Connection Applications
+            Connection Application
           </Text>
 
           <Text
@@ -1198,9 +1516,99 @@ export default function AdminScreen() {
                 application.status.toLowerCase() ===
                 "active";
 
+              const isMeterInstalled =
+                application.status.toLowerCase() ===
+                "meter_installed";
+
               const isInspectionPassed =
                 application.status.toLowerCase() ===
                 "inspection_passed";
+
+              const status = application.status.toLowerCase();
+              const inspectionCompleted = [
+                "inspection_passed",
+                "inspection_rejected",
+                "reinspect",
+                "meter_installed",
+                "active",
+              ].includes(status);
+              const meterInstalled =
+                isMeterInstalled || isActive;
+              const applicationTimeline = [
+                {
+                  title: "Application submitted",
+                  status: "Submitted",
+                  timestamp: application.submittedAt,
+                  complete: true,
+                  rejected: false,
+                },
+                {
+                  title: "Application review",
+                  status: isRejected
+                    ? "Rejected"
+                    : isPending
+                    ? "Awaiting decision"
+                    : "Approved",
+                  timestamp:
+                    application.reviewedAt ||
+                    application.approvedAt,
+                  complete: !isPending,
+                  rejected: isRejected,
+                },
+                {
+                  title: "Site inspection",
+                  status: isRejected
+                    ? "Not started"
+                    : inspectionCompleted
+                    ? "Completed"
+                    : status === "inspection"
+                    ? "In progress"
+                    : isApproved
+                    ? "Ready for inspection"
+                    : "Waiting for application review",
+                  timestamp: application.inspectedAt,
+                  complete: inspectionCompleted,
+                  rejected: false,
+                },
+                {
+                  title: "Inspection decision",
+                  status:
+                    status === "inspection_rejected"
+                      ? "Rejected"
+                      : status === "reinspect"
+                      ? "Re-inspection required"
+                      : isInspectionPassed || meterInstalled
+                      ? "Passed"
+                      : isRejected
+                      ? "Not started"
+                      : "Awaiting inspection",
+                  timestamp: application.inspectedAt,
+                  complete: inspectionCompleted,
+                  rejected: status === "inspection_rejected",
+                },
+                {
+                  title: "Meter installation",
+                  status: meterInstalled
+                    ? "Meter installed"
+                    : isInspectionPassed
+                    ? "Ready for installation"
+                    : "Not started",
+                  timestamp: application.installedAt,
+                  complete: meterInstalled,
+                  rejected: false,
+                },
+                {
+                  title: "Service activation",
+                  status: isActive
+                    ? "Active"
+                    : isMeterInstalled
+                    ? "Awaiting admin activation"
+                    : "Not active",
+                  timestamp: application.activatedAt,
+                  complete: isActive,
+                  rejected: false,
+                },
+              ];
 
               const isProcessing =
                 processingId ===
@@ -1213,6 +1621,29 @@ export default function AdminScreen() {
                     styles.applicationCard
                   }
                 >
+                  <TouchableOpacity
+                    style={styles.applicationIdDropdown}
+                    onPress={() =>
+                      toggleApplicationExpanded(application.id)
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel={`Application ${application.id}, ${
+                      expandedApplicationIds.has(application.id)
+                        ? "collapse"
+                        : "expand"
+                    } details`}
+                  >
+                    <Text style={styles.applicationIdText}>
+                      APPLICATION ID: {application.id}
+                    </Text>
+                    <Text style={styles.dropdownIndicator}>
+                      {expandedApplicationIds.has(application.id)
+                        ? "−"
+                        : "+"}
+                    </Text>
+                  </TouchableOpacity>
+                  {expandedApplicationIds.has(application.id) && (
+                    <>
                   {/* APPLICATION HEADER */}
                   <View
                     style={
@@ -1341,8 +1772,56 @@ export default function AdminScreen() {
                     </Text>
                   </View>
 
-                  {/* ACTIVE METER INFORMATION */}
-                  {isActive &&
+                  <View style={styles.applicationTimeline}>
+                    <Text style={styles.applicationTimelineTitle}>
+                      Application Progress
+                    </Text>
+                    {applicationTimeline.map((step, index) => (
+                      <View
+                        key={step.title}
+                        style={styles.applicationTimelineStep}
+                      >
+                        <View style={styles.applicationTimelineMarkerColumn}>
+                          <View
+                            style={[
+                              styles.applicationTimelineMarker,
+                              step.complete &&
+                                styles.applicationTimelineMarkerComplete,
+                              step.rejected &&
+                                styles.applicationTimelineMarkerRejected,
+                            ]}
+                          />
+                          {index < applicationTimeline.length - 1 ? (
+                            <View
+                              style={styles.applicationTimelineConnector}
+                            />
+                          ) : null}
+                        </View>
+                        <View style={styles.applicationTimelineContent}>
+                          <Text style={styles.applicationTimelineStepTitle}>
+                            {step.title}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.applicationTimelineStatus,
+                              step.complete &&
+                                styles.applicationTimelineStatusComplete,
+                              step.rejected &&
+                                styles.applicationTimelineStatusRejected,
+                            ]}
+                          >
+                            {step.status}
+                          </Text>
+                          <Text style={styles.applicationTimelineTimestamp}>
+                            {formatDateTime(step.timestamp)}
+                          </Text>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+
+                  {/* INSTALLED METER INFORMATION */}
+                  {(isMeterInstalled || isActive) &&
                     application.meterNumber && (
                       <View
                         style={
@@ -1367,7 +1846,7 @@ export default function AdminScreen() {
                               styles.applicationMeterStatus
                             }
                           >
-                            ACTIVE
+                            {isActive ? "ACTIVE" : "AWAITING ACTIVATION"}
                           </Text>
                         </View>
 
@@ -1391,6 +1870,14 @@ export default function AdminScreen() {
                             application.installedAt
                           )}
                         </Text>
+                        {application.activatedAt ? (
+                          <Text
+                            style={styles.applicationMeterDate}
+                          >
+                            Activated:{" "}
+                            {formatDate(application.activatedAt)}
+                          </Text>
+                        ) : null}
                       </View>
                     )}
 
@@ -1530,7 +2017,50 @@ export default function AdminScreen() {
                         staff inspection.
                       </Text>
                     </View>
+                  ) : isMeterInstalled ? (
+                    <View style={styles.actionRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.approveButton,
+                          isProcessing && styles.disabledButton,
+                        ]}
+                        onPress={() =>
+                          handleActivateService(application)
+                        }
+                        disabled={isProcessing}
+                      >
+                        {isProcessing ? (
+                          <ActivityIndicator
+                            color="#ffffff"
+                            size="small"
+                          />
+                        ) : (
+                          <Text style={styles.approveButtonText}>
+                            ACTIVATE SERVICE
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                    </View>
                   ) : null}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.applicationDeleteButton,
+                      isProcessing && styles.disabledButton,
+                    ]}
+                    onPress={() =>
+                      handleApplicationDelete(application)
+                    }
+                    disabled={isProcessing}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Delete ${application.fullName}'s connection application`}
+                  >
+                    <Text style={styles.applicationDeleteButtonText}>
+                      DELETE APPLICATION
+                    </Text>
+                  </TouchableOpacity>
+                    </>
+                  )}
                 </View>
               );
             }
@@ -1554,6 +2084,64 @@ export default function AdminScreen() {
           )}
         </TouchableOpacity>
       </ScrollView>
+      <Modal
+        visible={actionModal !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!actionModal?.busy) {
+            setActionModal(null);
+          }
+        }}
+      >
+        <View style={styles.actionModalOverlay}>
+          <View style={styles.actionModalCard}>
+            <Text style={styles.actionModalTitle}>
+              {actionModal?.title}
+            </Text>
+            <Text style={styles.actionModalMessage}>
+              {actionModal?.message}
+            </Text>
+            <View style={styles.actionModalButtons}>
+              {actionModal?.type === "confirm" && (
+                <TouchableOpacity
+                  style={styles.actionCancelButton}
+                  onPress={() => setActionModal(null)}
+                  disabled={actionModal.busy}
+                >
+                  <Text style={styles.actionCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={[
+                  styles.actionPrimaryButton,
+                  actionModal?.type === "result" &&
+                    actionModal.resultType === "error" &&
+                    styles.actionErrorButton,
+                ]}
+                onPress={() => {
+                  if (actionModal?.type === "confirm") {
+                    void confirmAction();
+                  } else {
+                    setActionModal(null);
+                  }
+                }}
+                disabled={actionModal?.busy}
+              >
+                {actionModal?.busy ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <Text style={styles.actionPrimaryText}>
+                    {actionModal?.type === "confirm"
+                      ? actionModal.actionLabel
+                      : "Close"}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1622,6 +2210,192 @@ const styles = StyleSheet.create({
     color: "#dcefe2",
     fontSize: 14,
     lineHeight: 21,
+  },
+
+  userManagementButton: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#dce9df",
+    padding: 17,
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  userManagementButtonTitle: {
+    color: "#176b3a",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+
+  userManagementButtonSubtitle: {
+    color: "#69766d",
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 4,
+    paddingRight: 12,
+  },
+
+  userManagementButtonIcon: {
+    color: "#176b3a",
+    fontSize: 26,
+    fontWeight: "700",
+  },
+
+  userManagementCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 17,
+    padding: 16,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: "#dce9df",
+  },
+
+  userGroup: {
+    marginTop: 4,
+    marginBottom: 14,
+  },
+
+  userGroupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingBottom: 10,
+    marginBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#dce9df",
+  },
+
+  userGroupTitle: {
+    color: "#1c2b21",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+
+  userGroupCount: {
+    color: "#176b3a",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  userCard: {
+    padding: 13,
+    marginBottom: 10,
+    backgroundColor: "#f7faf7",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e5eee7",
+  },
+
+  userDetails: {
+    marginBottom: 12,
+  },
+
+  userNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+
+  userName: {
+    flex: 1,
+    color: "#1c2b21",
+    fontSize: 15,
+    fontWeight: "800",
+  },
+
+  userStatusBadge: {
+    overflow: "hidden",
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 9,
+    fontWeight: "800",
+  },
+
+  userActiveBadge: {
+    color: "#176b3a",
+    backgroundColor: "#e1f3e6",
+  },
+
+  userInactiveBadge: {
+    color: "#9c2b25",
+    backgroundColor: "#fdebea",
+  },
+
+  userEmail: {
+    color: "#526158",
+    fontSize: 12,
+    marginTop: 5,
+  },
+
+  userPhone: {
+    color: "#69766d",
+    fontSize: 12,
+    marginTop: 3,
+  },
+
+  userActions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+
+  userStatusButton: {
+    flex: 1,
+    minHeight: 42,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 9,
+    backgroundColor: "#176b3a",
+  },
+
+  userStatusButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
+  userDeleteButton: {
+    flex: 1,
+    minHeight: 42,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: "#b3261e",
+    backgroundColor: "#ffffff",
+  },
+
+  userDeleteButtonText: {
+    color: "#b3261e",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
+  userActionDisabled: {
+    opacity: 0.45,
+  },
+
+  currentUserNote: {
+    color: "#69766d",
+    fontSize: 11,
+    marginTop: 8,
+    textAlign: "center",
+  },
+
+  emptyUsersText: {
+    color: "#69766d",
+    fontSize: 13,
+    textAlign: "center",
+    paddingVertical: 10,
+  },
+
+  loadingUsers: {
+    alignItems: "center",
+    paddingVertical: 20,
   },
 
   statsRow: {
@@ -1953,6 +2727,206 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     padding: 18,
     marginBottom: 14,
+  },
+
+  applicationIdDropdown: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderRadius: 9,
+    backgroundColor: "#f1f8f3",
+    paddingHorizontal: 11,
+    marginBottom: 12,
+  },
+
+  applicationIdText: {
+    flex: 1,
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  applicationTimeline: {
+    backgroundColor: "#f8fbf8",
+    borderRadius: 11,
+    padding: 13,
+    marginTop: 12,
+  },
+
+  applicationTimelineTitle: {
+    color: "#193c28",
+    fontSize: 13,
+    fontWeight: "900",
+    marginBottom: 13,
+  },
+
+  applicationTimelineStep: {
+    flexDirection: "row",
+    minHeight: 62,
+  },
+
+  applicationTimelineMarkerColumn: {
+    width: 19,
+    alignItems: "center",
+  },
+
+  applicationTimelineMarker: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: "#ffffff",
+    borderWidth: 2,
+    borderColor: "#cbd8ce",
+    zIndex: 1,
+  },
+
+  applicationTimelineMarkerComplete: {
+    backgroundColor: "#176b3a",
+    borderColor: "#176b3a",
+  },
+
+  applicationTimelineMarkerRejected: {
+    backgroundColor: "#b3261e",
+    borderColor: "#b3261e",
+  },
+
+  applicationTimelineConnector: {
+    position: "absolute",
+    top: 12,
+    bottom: 0,
+    width: 2,
+    backgroundColor: "#d8e8db",
+  },
+
+  applicationTimelineContent: {
+    flex: 1,
+    paddingLeft: 8,
+    paddingBottom: 12,
+  },
+
+  applicationTimelineStepTitle: {
+    color: "#193c28",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  applicationTimelineStatus: {
+    color: "#65756a",
+    fontSize: 10,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+
+  applicationTimelineStatusComplete: {
+    color: "#176b3a",
+  },
+
+  applicationTimelineStatusRejected: {
+    color: "#b3261e",
+  },
+
+  applicationTimelineTimestamp: {
+    color: "#87938a",
+    fontSize: 10,
+    marginTop: 2,
+  },
+
+  applicationDeleteButton: {
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#b3261e",
+    backgroundColor: "#ffffff",
+    marginTop: 14,
+  },
+
+  applicationDeleteButtonText: {
+    color: "#b3261e",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
+  dropdownIndicator: {
+    color: "#176b3a",
+    fontSize: 22,
+    fontWeight: "700",
+  },
+
+  actionModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+
+  actionModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    padding: 24,
+    backgroundColor: "#ffffff",
+  },
+
+  actionModalTitle: {
+    color: "#176b3a",
+    fontSize: 20,
+    fontWeight: "800",
+    textAlign: "center",
+    marginBottom: 12,
+  },
+
+  actionModalMessage: {
+    color: "#34443a",
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+
+  actionModalButtons: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 24,
+  },
+
+  actionCancelButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+  },
+
+  actionCancelText: {
+    color: "#34443a",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  actionPrimaryButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "#176b3a",
+  },
+
+  actionErrorButton: {
+    backgroundColor: "#b3261e",
+  },
+
+  actionPrimaryText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   applicationHeader: {

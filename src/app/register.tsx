@@ -4,6 +4,7 @@ import { router } from "expo-router";
 import { useState } from "react";
 import {
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -37,14 +38,20 @@ export default function RegisterScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<
     "success" | "error" | ""
   >("");
+  const [modalType, setModalType] = useState<
+    "confirm" | "success" | "error" | null
+  >(null);
+  const [modalMessage, setModalMessage] = useState("");
 
-  const handleRegister = async () => {
+  const handleRegister = () => {
     setMessage("");
     setMessageType("");
 
@@ -65,9 +72,15 @@ export default function RegisterScreen() {
       return;
     }
 
+    if (!/^[A-Za-z]+$/.test(cleanFirstName) || !/^[A-Za-z]+$/.test(cleanLastName)) {
+      setMessage("First and last names can contain letters only.");
+      setMessageType("error");
+      return;
+    }
+
     if (!/^09\d{9}$/.test(cleanPhoneNumber)) {
       setMessage(
-        "Please enter a valid Philippine mobile number starting with 09."
+        "Please enter exactly 11 digits for a Philippine mobile number starting with 09."
       );
       setMessageType("error");
       return;
@@ -96,6 +109,17 @@ export default function RegisterScreen() {
       setMessageType("error");
       return;
     }
+
+    setModalType("confirm");
+  };
+
+  const submitRegistration = async () => {
+    const cleanFirstName = firstName.trim();
+    const cleanLastName = lastName.trim();
+    const cleanPhoneNumber = phoneNumber.trim();
+    const cleanEmail = email.trim().toLowerCase();
+
+    setModalType(null);
 
     try {
       setLoading(true);
@@ -137,17 +161,10 @@ export default function RegisterScreen() {
         }
       );
 
-      setMessage(
+      setModalMessage(
         "A verification code has been sent to your email."
       );
-      setMessageType("success");
-
-      router.push({
-        pathname: "/otp-verification",
-        params: {
-          email: cleanEmail,
-        },
-      });
+      setModalType("success");
     } catch (error: any) {
       console.log("EmailJS error:", error);
 
@@ -160,8 +177,8 @@ export default function RegisterScreen() {
         error?.message ||
         "Unable to send the verification code. Please try again.";
 
-      setMessage(`EmailJS error: ${errorMessage}`);
-      setMessageType("error");
+      setModalMessage(`Unable to send the verification code: ${errorMessage}`);
+      setModalType("error");
     } finally {
       setLoading(false);
     }
@@ -203,7 +220,10 @@ export default function RegisterScreen() {
               placeholder="Enter first name"
               placeholderTextColor="#9aa69e"
               value={firstName}
-              onChangeText={setFirstName}
+              onChangeText={(value) =>
+                setFirstName(value.replace(/[^A-Za-z]/g, ""))
+              }
+              autoCapitalize="words"
               editable={!loading}
             />
 
@@ -216,7 +236,10 @@ export default function RegisterScreen() {
               placeholder="Enter last name"
               placeholderTextColor="#9aa69e"
               value={lastName}
-              onChangeText={setLastName}
+              onChangeText={(value) =>
+                setLastName(value.replace(/[^A-Za-z]/g, ""))
+              }
+              autoCapitalize="words"
               editable={!loading}
             />
 
@@ -229,7 +252,9 @@ export default function RegisterScreen() {
               placeholder="09XXXXXXXXX"
               placeholderTextColor="#9aa69e"
               value={phoneNumber}
-              onChangeText={setPhoneNumber}
+              onChangeText={(value) =>
+                setPhoneNumber(value.replace(/\D/g, "").slice(0, 11))
+              }
               keyboardType="phone-pad"
               maxLength={11}
               editable={!loading}
@@ -255,29 +280,63 @@ export default function RegisterScreen() {
               Password
             </Text>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Enter password"
-              placeholderTextColor="#9aa69e"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              editable={!loading}
-            />
+            <View style={styles.inputWithAction}>
+              <TextInput
+                style={styles.passwordInput}
+                placeholder="Enter password"
+                placeholderTextColor="#9aa69e"
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}
+                editable={!loading}
+              />
+              <TouchableOpacity
+                style={styles.visibilityButton}
+                onPress={() => setShowPassword(!showPassword)}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  showPassword ? "Hide password" : "Show password"
+                }
+                disabled={loading}
+              >
+                <Text style={styles.visibilityButtonText}>
+                  {showPassword ? "Hide" : "Show"}
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             <Text style={styles.label}>
               Confirm Password
             </Text>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Confirm password"
-              placeholderTextColor="#9aa69e"
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
-              secureTextEntry
-              editable={!loading}
-            />
+            <View style={styles.inputWithAction}>
+              <TextInput
+                style={styles.passwordInput}
+                placeholder="Confirm password"
+                placeholderTextColor="#9aa69e"
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                secureTextEntry={!showConfirmPassword}
+                editable={!loading}
+              />
+              <TouchableOpacity
+                style={styles.visibilityButton}
+                onPress={() =>
+                  setShowConfirmPassword(!showConfirmPassword)
+                }
+                accessibilityRole="button"
+                accessibilityLabel={
+                  showConfirmPassword
+                    ? "Hide confirm password"
+                    : "Show confirm password"
+                }
+                disabled={loading}
+              >
+                <Text style={styles.visibilityButtonText}>
+                  {showConfirmPassword ? "Hide" : "Show"}
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             {message ? (
               <View
@@ -328,6 +387,75 @@ export default function RegisterScreen() {
           </View>
         </View>
       </ScrollView>
+      <Modal
+        visible={modalType !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setModalType(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              {modalType === "confirm"
+                ? "Confirm Registration"
+                : modalType === "success"
+                  ? "Verification Email Sent"
+                  : "Registration Error"}
+            </Text>
+            <Text style={styles.modalMessage}>
+              {modalType === "confirm"
+                ? `Continue with registration for ${firstName} ${lastName} (${email.trim()})? A one-time verification code will be sent to your email.`
+                : modalMessage}
+            </Text>
+            <View style={styles.modalActions}>
+              {modalType === "confirm" ? (
+                <>
+                  <TouchableOpacity
+                    style={[styles.modalButton, styles.modalCancelButton]}
+                    onPress={() => setModalType(null)}
+                    disabled={loading}
+                  >
+                    <Text style={styles.modalCancelButtonText}>
+                      Cancel
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalButton, styles.modalPrimaryButton]}
+                    onPress={submitRegistration}
+                    disabled={loading}
+                  >
+                    <Text style={styles.modalPrimaryButtonText}>
+                      Continue
+                    </Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.modalPrimaryButton]}
+                  onPress={() => {
+                    const shouldContinue = modalType === "success";
+                    setModalType(null);
+                    if (shouldContinue) {
+                      router.push({
+                        pathname: "/otp-verification",
+                        params: {
+                          email: email.trim().toLowerCase(),
+                        },
+                      });
+                    }
+                  }}
+                >
+                  <Text style={styles.modalPrimaryButtonText}>
+                    {modalType === "success"
+                      ? "Continue to Verification"
+                      : "Close"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -414,6 +542,106 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#1c2b21",
     backgroundColor: "#fbfdfb",
+  },
+
+  inputWithAction: {
+    height: 50,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 12,
+    paddingLeft: 15,
+    paddingRight: 10,
+    backgroundColor: "#fbfdfb",
+  },
+
+  passwordInput: {
+    flex: 1,
+    height: "100%",
+    padding: 0,
+    fontSize: 15,
+    color: "#1c2b21",
+  },
+
+  visibilityButton: {
+    paddingHorizontal: 5,
+    paddingVertical: 10,
+  },
+
+  visibilityButtonText: {
+    color: "#176b3a",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  modalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
+
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    padding: 24,
+    backgroundColor: "#ffffff",
+  },
+
+  modalTitle: {
+    marginBottom: 12,
+    color: "#176b3a",
+    fontSize: 20,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  modalMessage: {
+    color: "#34443a",
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center",
+  },
+
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 10,
+    marginTop: 24,
+  },
+
+  modalButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+  },
+
+  modalCancelButton: {
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+  },
+
+  modalCancelButtonText: {
+    color: "#34443a",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  modalPrimaryButton: {
+    backgroundColor: "#176b3a",
+  },
+
+  modalPrimaryButtonText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   messageBox: {
