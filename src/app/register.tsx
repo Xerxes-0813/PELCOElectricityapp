@@ -207,7 +207,7 @@ export default function RegisterScreen() {
           </Text>
 
           <Text style={styles.subtitle}>
-            Register your PELCO customer account
+            Register your Kur-yente CO customer account
           </Text>
 
           <View style={styles.form}>

@@ -1,0 +1,247 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // USERS
+    // =========================================================
+    match /users/{userId} {
+
+      allow read: if isSignedIn()
+                  && (
+                    request.auth.uid == userId
+                    || isAdmin()
+                  );
+
+      allow create: if isSignedIn()
+                    && (
+                      request.auth.uid == userId
+                      || isAdmin()
+                    );
+
+      allow update: if isSignedIn()
+                    && (
+                      request.auth.uid == userId
+                      || isAdmin()
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // APPLICATIONS
+    // =========================================================
+    match /applications/{applicationId} {
+
+      allow create: if isSignedIn()
+                    && (
+                      request.resource.data.customerId == request.auth.uid
+                      || isAdmin()
+                      || isFieldStaff()
+                    );
+
+      allow read: if isSignedIn()
+                  && (
+                    resource.data.customerId == request.auth.uid
+                    || isAdmin()
+                    || isFieldStaff()
+                  );
+
+      allow update: if isSignedIn()
+                    && (
+                      resource.data.customerId == request.auth.uid
+                      || isAdmin()
+                      || isFieldStaff()
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // METERS
+    // =========================================================
+    match /meters/{meterId} {
+
+      allow read: if isSignedIn();
+
+      allow create: if isAdmin()
+                    || isFieldStaff();
+
+      allow update: if isAdmin()
+                    || isFieldStaff();
+
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // METER READINGS
+    // =========================================================
+    match /meterReadings/{readingId} {
+
+      allow read: if isSignedIn();
+
+      allow create: if isAdmin()
+                    || isFieldStaff();
+
+      allow update: if isAdmin()
+                    || isFieldStaff();
+
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // CUSTOMER APPLIANCES
+    // =========================================================
+    match /appliances/{applianceId} {
+
+      // Customer can read their own appliances.
+      // Admin and Field Staff can also read them.
+      allow read: if isSignedIn()
+                  && (
+                    resource.data.customerId == request.auth.uid
+                    || isAdmin()
+                    || isFieldStaff()
+                  );
+
+      // Customer can create an appliance only for themselves.
+      allow create: if isSignedIn()
+                    && request.resource.data.customerId == request.auth.uid;
+
+      // Customer can update only their own appliance.
+      // customerId cannot be changed to another customer.
+      allow update: if isSignedIn()
+                    && resource.data.customerId == request.auth.uid
+                    && request.resource.data.customerId == request.auth.uid;
+
+      // Customer can delete only their own appliance.
+      allow delete: if isSignedIn()
+                    && resource.data.customerId == request.auth.uid;
+    }
+
+
+    // =========================================================
+    // CUSTOMER REPORTS
+    // =========================================================
+    match /reports/{reportId} {
+
+      allow create: if isSignedIn()
+                    && request.resource.data.keys().hasAll([
+                      "customerId",
+                      "customerName",
+                      "customerEmail",
+                      "subject",
+                      "description",
+                      "status",
+                      "createdAt"
+                    ])
+                    && request.resource.data.keys().hasOnly([
+                      "customerId",
+                      "customerName",
+                      "customerEmail",
+                      "contactPhone",
+                      "otherContacts",
+                      "subject",
+                      "description",
+                      "status",
+                      "resolution",
+                      "createdAt"
+                    ])
+                    && request.resource.data.customerId == request.auth.uid
+                    && request.resource.data.customerName is string
+                    && request.resource.data.customerName.size() <= 200
+                    && request.resource.data.customerEmail is string
+                    && request.resource.data.customerEmail.size() <= 320
+                    && (
+                      !("contactPhone" in request.resource.data)
+                      || (
+                        request.resource.data.contactPhone is string
+                        && request.resource.data.contactPhone.size() <= 40
+                      )
+                    )
+                    && (
+                      !("otherContacts" in request.resource.data)
+                      || (
+                        request.resource.data.otherContacts is string
+                        && request.resource.data.otherContacts.size() <= 500
+                      )
+                    )
+                    && request.resource.data.subject is string
+                    && request.resource.data.subject.size() > 0
+                    && request.resource.data.subject.size() <= 120
+                    && request.resource.data.description is string
+                    && request.resource.data.description.size() > 0
+                    && request.resource.data.description.size() <= 2000
+                    && request.resource.data.status == "not_resolved"
+                    && (
+                      !("resolution" in request.resource.data)
+                      || request.resource.data.resolution == ""
+                    )
+                    && request.resource.data.createdAt is timestamp;
+
+      allow read: if isSignedIn()
+                  && (
+                    resource.data.customerId == request.auth.uid
+                    || isAdmin()
+                    || (
+                      isFieldStaff()
+                      && resource.data.assignedTechnicianId == request.auth.uid
+                    )
+                  );
+
+      allow update: if isAdmin()
+                    || (
+                      isFieldStaff()
+                      && resource.data.assignedTechnicianId == request.auth.uid
+                      && request.resource.data.diff(resource.data).affectedKeys()
+                           .hasOnly([
+                             "fieldWorkStatus",
+                             "fieldStaffUpdate",
+                             "fieldStaffUpdatedAt",
+                             "updatedAt"
+                           ])
+                      && request.resource.data.fieldWorkStatus
+                           in ["in_progress", "done", "not_done"]
+                      && request.resource.data.fieldStaffUpdate is string
+                      && request.resource.data.fieldStaffUpdate.size() <= 2000
+                      && request.resource.data.fieldStaffUpdatedAt is timestamp
+                      && request.resource.data.updatedAt is timestamp
+                    );
+
+      allow delete: if isAdmin();
+
+      match /internalNotes/{noteId} {
+        allow read, write: if isAdmin();
+      }
+    }
+
+
+    // =========================================================
+    // HELPER FUNCTIONS
+    // =========================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+
+    function isAdmin() {
+      return isSignedIn()
+             && get(
+                  /databases/$(database)/documents/users/$(request.auth.uid)
+                ).data.role == "admin";
+    }
+
+
+    function isFieldStaff() {
+      return isSignedIn()
+             && get(
+                  /databases/$(database)/documents/users/$(request.auth.uid)
+                ).data.role == "field-staff";
+    }
+  }
+}

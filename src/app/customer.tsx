@@ -1,17 +1,22 @@
 import { router } from "expo-router";
-import { onAuthStateChanged } from "firebase/auth";
+import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
+    addDoc,
     collection,
     onSnapshot,
     query,
+    serverTimestamp,
     where,
 } from "firebase/firestore";
 import { useEffect, useState } from "react";
 import {
     ActivityIndicator,
+    Alert,
+    Modal,
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
 } from "react-native";
@@ -38,6 +43,12 @@ type Application = {
   reviewedAt?: any;
   approvedAt?: any;
   activatedAt?: any;
+  previousReading?: number;
+  currentReading?: number;
+  estimatedBill?: number;
+  lastMeterReading?: number;
+  lastEstimatedBill?: number;
+  billingCycleStartedAt?: any;
 };
 
 type Appliance = {
@@ -53,6 +64,37 @@ type Appliance = {
   updatedAt?: any;
 };
 
+type MeterReading = {
+  id: string;
+  applicationId: string;
+  currentReading: number;
+  consumption: number;
+  estimatedBill: number;
+  readingDate?: any;
+};
+
+type CustomerReport = {
+  id: string;
+  subject: string;
+  description: string;
+  status:
+    | "pending"
+    | "under_review"
+    | "assigned"
+    | "in_progress"
+    | "resolved"
+    | "closed"
+    | "rejected";
+  assignedTechnicianName?: string;
+  fieldWorkStatus?: "in_progress" | "done" | "not_done";
+  fieldStaffUpdate?: string;
+  fieldStaffUpdatedAt?: any;
+  customerUpdate?: string;
+  resolution?: string;
+  createdAt?: any;
+  resolvedAt?: any;
+};
+
 export default function CustomerScreen() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
@@ -61,8 +103,28 @@ export default function CustomerScreen() {
 
   const [appliances, setAppliances] =
     useState<Appliance[]>([]);
+  const [meterReadings, setMeterReadings] =
+    useState<MeterReading[]>([]);
+  const [customerReports, setCustomerReports] =
+    useState<CustomerReport[]>([]);
+  const [customerReportsExpanded, setCustomerReportsExpanded] =
+    useState(false);
+  const [expandedCustomerReportIds, setExpandedCustomerReportIds] = useState<
+    Set<string>
+  >(() => new Set());
 
   const [loading, setLoading] = useState(true);
+  const [logoutModalVisible, setLogoutModalVisible] =
+    useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [reportSubject, setReportSubject] = useState("");
+  const [reportDescription, setReportDescription] = useState("");
+  const [reportContactEmail, setReportContactEmail] = useState("");
+  const [reportContactPhone, setReportContactPhone] = useState("");
+  const [reportOtherContacts, setReportOtherContacts] = useState("");
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const [currentTime, setCurrentTime] = useState(
     new Date()
@@ -78,6 +140,8 @@ export default function CustomerScreen() {
           setCurrentUserId(null);
           setApplication(null);
           setAppliances([]);
+          setMeterReadings([]);
+          setCustomerReports([]);
           setLoading(false);
         }
       }
@@ -159,6 +223,113 @@ export default function CustomerScreen() {
       return;
     }
 
+    const reportsQuery = query(
+      collection(db, "reports"),
+      where("customerId", "==", currentUserId)
+    );
+    const unsubscribe = onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const reports: CustomerReport[] = snapshot.docs.map((document) => {
+          const data = document.data();
+          return {
+            id: document.id,
+            subject: String(data.subject || ""),
+            description: String(data.description || ""),
+            status: [
+              "pending",
+              "under_review",
+              "assigned",
+              "in_progress",
+              "resolved",
+              "closed",
+              "rejected",
+            ].includes(data.status)
+              ? data.status
+              : "pending",
+            assignedTechnicianName: String(data.assignedTechnicianName || ""),
+            fieldWorkStatus:
+              data.fieldWorkStatus === "in_progress" ||
+              data.fieldWorkStatus === "done" ||
+              data.fieldWorkStatus === "not_done"
+                ? data.fieldWorkStatus
+                : undefined,
+            fieldStaffUpdate: String(data.fieldStaffUpdate || ""),
+            fieldStaffUpdatedAt: data.fieldStaffUpdatedAt,
+            customerUpdate: String(data.customerUpdate || ""),
+            resolution: String(data.resolution || ""),
+            createdAt: data.createdAt,
+            resolvedAt: data.resolvedAt,
+          };
+        });
+        reports.sort((a, b) => {
+          const aTime = a.createdAt?.toMillis?.() || 0;
+          const bTime = b.createdAt?.toMillis?.() || 0;
+          return bTime - aTime;
+        });
+        setCustomerReports(reports);
+      },
+      (error) => {
+        console.log("Customer report history error:", error);
+        Alert.alert(
+          "Unable to Load Your Reports",
+          error.message || "Something went wrong while loading your reports."
+        );
+      }
+    );
+    return unsubscribe;
+  }, [currentUserId]);
+
+  useEffect(() => {
+    if (!currentUserId) {
+      return;
+    }
+
+    const readingsQuery = query(
+      collection(db, "meterReadings"),
+      where("customerId", "==", currentUserId)
+    );
+
+    const unsubscribe = onSnapshot(
+      readingsQuery,
+      (snapshot) => {
+        const readings: MeterReading[] = snapshot.docs.map(
+          (document) => {
+            const data = document.data();
+            return {
+              id: document.id,
+              applicationId: String(data.applicationId || ""),
+              currentReading: Number(data.currentReading || 0),
+              consumption: Number(data.consumption || 0),
+              estimatedBill: Number(data.estimatedBill || 0),
+              readingDate: data.readingDate || data.createdAt,
+            };
+          }
+        );
+        readings.sort((a, b) => {
+          const aTime = a.readingDate?.toMillis?.() || 0;
+          const bTime = b.readingDate?.toMillis?.() || 0;
+          return bTime - aTime;
+        });
+        setMeterReadings(readings);
+      },
+      (error) => {
+        console.log("Customer meter reading history error:", error);
+        Alert.alert(
+          "Unable to Load Meter Reading History",
+          error.message || "Something went wrong while loading meter readings."
+        );
+      }
+    );
+
+    return unsubscribe;
+  }, [currentUserId]);
+
+  useEffect(() => {
+    if (!currentUserId) {
+      return;
+    }
+
     const appliancesQuery = query(
       collection(db, "appliances"),
       where(
@@ -227,10 +398,30 @@ export default function CustomerScreen() {
     normalizedStatus === "active" &&
     !!application?.meterNumber;
 
+  const getTimestampMillis = (timestamp: any) => {
+    if (typeof timestamp?.toMillis === "function") {
+      return timestamp.toMillis();
+    }
+    if (timestamp instanceof Date) {
+      return timestamp.getTime();
+    }
+    return typeof timestamp === "number" ? timestamp : 0;
+  };
+
   const getLiveKwh = (
     appliance: Appliance
   ) => {
+    const billingCycleStartedAt = getTimestampMillis(
+      application?.billingCycleStartedAt
+    );
+    const applianceUpdatedAt = getTimestampMillis(
+      appliance.updatedAt
+    );
     const savedKwh =
+      billingCycleStartedAt > 0 &&
+      applianceUpdatedAt < billingCycleStartedAt
+        ? 0
+        :
       Number(appliance.totalKwh) || 0;
 
     if (
@@ -262,6 +453,10 @@ export default function CustomerScreen() {
 
     if (!turnedOnTime) {
       return savedKwh;
+    }
+
+    if (billingCycleStartedAt > 0) {
+      turnedOnTime = Math.max(turnedOnTime, billingCycleStartedAt);
     }
 
     const elapsedMilliseconds =
@@ -651,6 +846,91 @@ export default function CustomerScreen() {
   const showApplication =
     !!application;
 
+  const handleLogout = async () => {
+    if (loggingOut) {
+      return;
+    }
+
+    setLoggingOut(true);
+
+    try {
+      await signOut(auth);
+      setLogoutModalVisible(false);
+      router.replace("/");
+    } catch (error) {
+      console.log("Logout error:", error);
+      setLoggingOut(false);
+      Alert.alert(
+        "Logout Error",
+        "Unable to log out right now. Please try again."
+      );
+    }
+  };
+
+  const handleSubmitReport = async () => {
+    const subject = reportSubject.trim();
+    const description = reportDescription.trim();
+    const contactEmail =
+      reportContactEmail.trim() || auth.currentUser?.email || "";
+    const contactPhone =
+      reportContactPhone.trim() || application?.contactNumber || "";
+    const otherContacts = reportOtherContacts.trim();
+    const user = auth.currentUser;
+
+    if (!user) {
+      setReportError("Your session has expired. Please log in again.");
+      return;
+    }
+    if (!subject || !description) {
+      setReportError("Enter both a subject and a description.");
+      return;
+    }
+    if (!contactEmail || !contactPhone) {
+      setReportError("Enter a contact email and phone number.");
+      return;
+    }
+
+    try {
+      setReportError(null);
+      setSubmittingReport(true);
+      await addDoc(collection(db, "reports"), {
+        customerId: user.uid,
+        customerName: application?.fullName || user.displayName || "Customer",
+        customerEmail: contactEmail,
+        contactPhone,
+        otherContacts,
+        subject,
+        description,
+        status: "not_resolved",
+        resolution: "",
+        createdAt: serverTimestamp(),
+      });
+      setReportSubject("");
+      setReportDescription("");
+      setReportContactEmail("");
+      setReportContactPhone("");
+      setReportOtherContacts("");
+      setReportModalVisible(false);
+      Alert.alert("Report Submitted", "Your report has been sent to the administrator.");
+    } catch (error) {
+      console.log("Customer report submission error:", error);
+      const firebaseError = error as {
+        code?: string;
+        message?: string;
+      };
+      const errorCode = firebaseError.code || "unknown";
+      const errorMessage =
+        firebaseError.message || "Unable to submit your report. Please try again.";
+      setReportError(
+        errorCode === "permission-denied"
+          ? `Firestore rejected the write to the "reports" collection (permission-denied): ${errorMessage} Check that the published rules allow this write in the Firebase project configured for the app.`
+          : `Report could not be sent (${errorCode}): ${errorMessage}`
+      );
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -684,7 +964,7 @@ export default function CustomerScreen() {
             <Text
               style={styles.headerSmall}
             >
-              PELCO
+              Kur-yente CO
             </Text>
 
             <Text
@@ -696,9 +976,7 @@ export default function CustomerScreen() {
 
           <TouchableOpacity
             style={styles.logoutButton}
-            onPress={() =>
-              router.replace("/")
-            }
+            onPress={() => setLogoutModalVisible(true)}
           >
             <Text
               style={styles.logoutText}
@@ -743,6 +1021,156 @@ export default function CustomerScreen() {
           >
             {formatTime(currentTime)}
           </Text>
+        </View>
+
+        <TouchableOpacity
+          style={styles.reportButton}
+          onPress={() => {
+            setReportContactEmail(auth.currentUser?.email || "");
+            setReportContactPhone(application?.contactNumber || "");
+            setReportModalVisible(true);
+          }}
+          accessibilityRole="button"
+        >
+          <Text style={styles.reportButtonTitle}>Report an Issue</Text>
+          <Text style={styles.reportButtonSubtitle}>
+            Send a report to the administrator
+          </Text>
+        </TouchableOpacity>
+
+        <View style={styles.customerReportsSection}>
+          <TouchableOpacity
+            style={styles.customerReportsHeader}
+            onPress={() =>
+              setCustomerReportsExpanded((expanded) => !expanded)
+            }
+            accessibilityRole="button"
+            accessibilityState={{ expanded: customerReportsExpanded }}
+          >
+            <Text style={styles.customerReportsTitle}>Your Reports</Text>
+            <View style={styles.customerReportsHeaderRight}>
+              <Text style={styles.customerReportsCount}>
+                {customerReports.length}
+              </Text>
+              <Text style={styles.customerReportsChevron}>
+                {customerReportsExpanded ? "−" : "+"}
+              </Text>
+            </View>
+          </TouchableOpacity>
+          {customerReportsExpanded && customerReports.length === 0 ? (
+            <Text style={styles.customerReportsEmpty}>
+              Reports you send and the administrator&apos;s resolution updates will
+              appear here.
+            </Text>
+          ) : null}
+          {customerReportsExpanded && customerReports.length > 0 ? (
+            customerReports.map((report) => (
+              <View key={report.id} style={styles.customerReportCard}>
+                <TouchableOpacity
+                  style={styles.customerReportHeader}
+                  onPress={() =>
+                    setExpandedCustomerReportIds((current) => {
+                      const next = new Set(current);
+                      if (next.has(report.id)) next.delete(report.id);
+                      else next.add(report.id);
+                      return next;
+                    })
+                  }
+                  accessibilityRole="button"
+                  accessibilityState={{
+                    expanded: expandedCustomerReportIds.has(report.id),
+                  }}
+                >
+                  <Text style={styles.customerReportSubject}>
+                    {report.subject}
+                  </Text>
+                  <View style={styles.customerReportHeaderMeta}>
+                    <Text
+                      style={[
+                        styles.customerReportStatus,
+                        report.status === "resolved"
+                          ? styles.customerReportResolved
+                          : styles.customerReportOpen,
+                      ]}
+                    >
+                      {report.status.replace("_", " ").toUpperCase()}
+                    </Text>
+                    <Text style={styles.customerReportsChevron}>
+                      {expandedCustomerReportIds.has(report.id) ? "−" : "+"}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+                {expandedCustomerReportIds.has(report.id) ? (
+                  <View>
+                <Text style={styles.customerReportDescription}>
+                  {report.description}
+                </Text>
+                <Text style={styles.customerResolutionDate}>
+                  Submitted: {formatDateTime(report.createdAt)}
+                </Text>
+                {report.assignedTechnicianName ? (
+                  <Text style={styles.customerReportAssignee}>
+                    Assigned technician: {report.assignedTechnicianName}
+                  </Text>
+                ) : null}
+                <View style={styles.customerResolutionBox}>
+                  <Text style={styles.customerResolutionTitle}>
+                    Field Staff Work Status:{" "}
+                    {report.fieldWorkStatus
+                      ? report.fieldWorkStatus.replace("_", " ").toUpperCase()
+                      : "NOT UPDATED"}
+                  </Text>
+                  {report.fieldStaffUpdate ? (
+                    <Text style={styles.customerResolutionText}>
+                      {report.fieldStaffUpdate}
+                    </Text>
+                  ) : null}
+                  {report.fieldStaffUpdatedAt ? (
+                    <Text style={styles.customerResolutionDate}>
+                      Updated: {formatDateTime(report.fieldStaffUpdatedAt)}
+                    </Text>
+                  ) : null}
+                </View>
+                {report.customerUpdate ? (
+                  <View style={styles.customerResolutionBox}>
+                    <Text style={styles.customerResolutionTitle}>
+                      Administrator&apos;s update
+                    </Text>
+                    <Text style={styles.customerResolutionText}>
+                      {report.customerUpdate}
+                    </Text>
+                  </View>
+                ) : null}
+                {report.status === "resolved" ? (
+                  <View style={styles.customerResolutionBox}>
+                    <Text style={styles.customerResolutionTitle}>
+                      How the administrator resolved it
+                    </Text>
+                    <Text style={styles.customerResolutionText}>
+                      {report.resolution ||
+                        "The administrator marked this issue resolved without adding details."}
+                    </Text>
+                    {report.resolvedAt ? (
+                      <Text style={styles.customerResolutionDate}>
+                        Resolved: {formatDateTime(report.resolvedAt)}
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : report.resolution && !report.customerUpdate ? (
+                  <View style={styles.customerResolutionBox}>
+                    <Text style={styles.customerResolutionTitle}>
+                      Administrator&apos;s update
+                    </Text>
+                    <Text style={styles.customerResolutionText}>
+                      {report.resolution}
+                    </Text>
+                  </View>
+                ) : null}
+                  </View>
+                ) : null}
+              </View>
+            ))
+          ) : null}
         </View>
 
         {/* APPLICATION STATUS */}
@@ -1198,6 +1626,36 @@ export default function CustomerScreen() {
                     </Text>
                   </View>
                 </View>
+
+                <View style={styles.connectionRow}>
+                  <View style={styles.connectionItem}>
+                    <Text style={styles.connectionLabel}>
+                      Your Meter Reading
+                    </Text>
+                    <Text style={styles.connectionValue}>
+                      {formatNumber(
+                        application.lastMeterReading ??
+                          (application.currentReading &&
+                          application.currentReading > 0
+                            ? application.currentReading
+                            : application.previousReading ?? 0)
+                      )}{" "}
+                      kWh
+                    </Text>
+                  </View>
+                  <View style={styles.connectionItem}>
+                    <Text style={styles.connectionLabel}>
+                      Previous Estimated Bill
+                    </Text>
+                    <Text style={styles.connectionValue}>
+                      {formatCurrency(
+                        application.lastEstimatedBill ??
+                          application.estimatedBill ??
+                          0
+                      )}
+                    </Text>
+                  </View>
+                </View>
               </View>
             )}
 
@@ -1437,6 +1895,44 @@ export default function CustomerScreen() {
                   </Text>
                 </View>
 
+                <View style={styles.readingHistoryCard}>
+                  <Text style={styles.readingHistoryTitle}>
+                    Meter Reading History
+                  </Text>
+                  {meterReadings.filter(
+                    (reading) => reading.applicationId === application.id
+                  ).length === 0 ? (
+                    <Text style={styles.readingHistoryEmpty}>
+                      No saved meter readings yet.
+                    </Text>
+                  ) : (
+                    meterReadings
+                      .filter(
+                        (reading) =>
+                          reading.applicationId === application.id
+                      )
+                      .map((reading) => (
+                        <View
+                          key={reading.id}
+                          style={styles.readingHistoryRow}
+                        >
+                          <View style={styles.readingHistoryDetails}>
+                            <Text style={styles.readingHistoryDate}>
+                              {formatDateTime(reading.readingDate)}
+                            </Text>
+                            <Text style={styles.readingHistoryInfo}>
+                              Meter reading:{" "}
+                              {formatNumber(reading.currentReading)} kWh
+                            </Text>
+                          </View>
+                          <Text style={styles.readingHistoryBill}>
+                            {formatCurrency(reading.estimatedBill)}
+                          </Text>
+                        </View>
+                      ))
+                  )}
+                </View>
+
                 {/* APPLIANCE MONITOR BUTTON */}
                 <TouchableOpacity
                   style={
@@ -1509,7 +2005,7 @@ export default function CustomerScreen() {
           <Text
             style={styles.footerTitle}
           >
-            PELCO Electricity App
+            Kur-yente CO
           </Text>
 
           <Text
@@ -1528,6 +2024,157 @@ export default function CustomerScreen() {
           </Text>
         </View>
       </ScrollView>
+      <Modal
+        visible={reportModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!submittingReport) {
+            setReportModalVisible(false);
+            setReportError(null);
+          }
+        }}
+      >
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalCard}>
+            <Text style={styles.reportModalTitle}>Report an Issue</Text>
+            <ScrollView
+              style={styles.reportFormScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+            <Text style={styles.reportInputLabel}>Subject</Text>
+            <TextInput
+              style={styles.reportSubjectInput}
+              value={reportSubject}
+              onChangeText={(value) => {
+                setReportSubject(value);
+                setReportError(null);
+              }}
+              placeholder="Briefly describe the issue"
+              placeholderTextColor="#8a9a90"
+              maxLength={120}
+              editable={!submittingReport}
+            />
+            <Text style={styles.reportInputLabel}>Contact Email</Text>
+            <TextInput
+              style={styles.reportSubjectInput}
+              value={reportContactEmail}
+              onChangeText={setReportContactEmail}
+              placeholder="Email where we can reach you"
+              placeholderTextColor="#8a9a90"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              maxLength={320}
+              editable={!submittingReport}
+            />
+            <Text style={styles.reportInputLabel}>Phone Number</Text>
+            <TextInput
+              style={styles.reportSubjectInput}
+              value={reportContactPhone}
+              onChangeText={setReportContactPhone}
+              placeholder="Phone number where we can reach you"
+              placeholderTextColor="#8a9a90"
+              keyboardType="phone-pad"
+              maxLength={40}
+              editable={!submittingReport}
+            />
+            <Text style={styles.reportInputLabel}>Other Contacts (optional)</Text>
+            <TextInput
+              style={styles.reportSubjectInput}
+              value={reportOtherContacts}
+              onChangeText={setReportOtherContacts}
+              placeholder="Alternative contact or preferred contact time"
+              placeholderTextColor="#8a9a90"
+              maxLength={500}
+              editable={!submittingReport}
+            />
+            <Text style={styles.reportInputLabel}>Description</Text>
+            <TextInput
+              style={styles.reportDescriptionInput}
+              value={reportDescription}
+              onChangeText={(value) => {
+                setReportDescription(value);
+                setReportError(null);
+              }}
+              placeholder="Provide details about the issue"
+              placeholderTextColor="#8a9a90"
+              multiline
+              textAlignVertical="top"
+              maxLength={2000}
+              editable={!submittingReport}
+            />
+            </ScrollView>
+            {reportError ? (
+              <Text accessibilityRole="alert" style={styles.reportError}>
+                {reportError}
+              </Text>
+            ) : null}
+            <View style={styles.reportModalButtons}>
+              <TouchableOpacity
+                style={styles.reportCancelButton}
+                onPress={() => {
+                  setReportModalVisible(false);
+                  setReportError(null);
+                }}
+                disabled={submittingReport}
+              >
+                <Text style={styles.reportCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.reportSubmitButton}
+                onPress={() => void handleSubmitReport()}
+                disabled={submittingReport}
+              >
+                {submittingReport ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <Text style={styles.reportSubmitText}>Send Report</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={logoutModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!loggingOut) {
+            setLogoutModalVisible(false);
+          }
+        }}
+      >
+        <View style={styles.logoutModalOverlay}>
+          <View style={styles.logoutModalCard}>
+            <Text style={styles.logoutModalTitle}>Log Out</Text>
+            <Text style={styles.logoutModalMessage}>
+              Are you sure you want to log out?
+            </Text>
+            <View style={styles.logoutModalButtons}>
+              <TouchableOpacity
+                style={styles.logoutCancelButton}
+                onPress={() => setLogoutModalVisible(false)}
+                disabled={loggingOut}
+              >
+                <Text style={styles.logoutCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.logoutConfirmButton}
+                onPress={() => void handleLogout()}
+                disabled={loggingOut}
+              >
+                {loggingOut ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <Text style={styles.logoutConfirmText}>Log Out</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1591,6 +2238,342 @@ const styles = StyleSheet.create({
     color: "#b33a3a",
     fontSize: 12,
     fontWeight: "900",
+  },
+
+  reportButton: {
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#d7e8da",
+    borderRadius: 14,
+    padding: 15,
+    marginBottom: 18,
+  },
+
+  reportButtonTitle: {
+    color: "#176b3a",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  reportButtonSubtitle: {
+    color: "#718076",
+    fontSize: 12,
+    marginTop: 4,
+  },
+
+  customerReportsSection: {
+    marginBottom: 18,
+  },
+
+  customerReportsTitle: {
+    color: "#153d27",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  customerReportsHeader: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#dce9df",
+    borderRadius: 12,
+    paddingHorizontal: 13,
+    marginBottom: 9,
+  },
+
+  customerReportsHeaderRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  customerReportsCount: {
+    color: "#718076",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  customerReportsChevron: {
+    color: "#176b3a",
+    fontSize: 18,
+    fontWeight: "900",
+    minWidth: 18,
+    textAlign: "center",
+  },
+
+  customerReportsEmpty: {
+    color: "#718076",
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#dce9df",
+    borderRadius: 14,
+    padding: 14,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+
+  customerReportCard: {
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#dce9df",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 9,
+  },
+
+  customerReportHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+
+  customerReportHeaderMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+
+  customerReportSubject: {
+    flex: 1,
+    color: "#153d27",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  customerReportStatus: {
+    overflow: "hidden",
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 9,
+    fontWeight: "900",
+  },
+
+  customerReportResolved: {
+    color: "#176b3a",
+    backgroundColor: "#dff2e4",
+  },
+
+  customerReportOpen: {
+    color: "#8a5b08",
+    backgroundColor: "#fff2cf",
+  },
+
+  customerReportDescription: {
+    color: "#526258",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
+  },
+
+  customerReportAssignee: {
+    color: "#526258",
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 6,
+  },
+
+  customerResolutionBox: {
+    backgroundColor: "#f1f8f3",
+    borderRadius: 10,
+    padding: 11,
+    marginTop: 11,
+  },
+
+  customerResolutionTitle: {
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+
+  customerResolutionText: {
+    color: "#34443a",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 5,
+  },
+
+  customerResolutionDate: {
+    color: "#718076",
+    fontSize: 10,
+    marginTop: 7,
+  },
+
+  reportModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+
+  reportModalCard: {
+    width: "100%",
+    maxWidth: 440,
+    maxHeight: "90%",
+    borderRadius: 18,
+    padding: 20,
+    backgroundColor: "#ffffff",
+  },
+
+  reportFormScroll: {
+    flexShrink: 1,
+  },
+
+  reportModalTitle: {
+    color: "#176b3a",
+    fontSize: 20,
+    fontWeight: "900",
+    marginBottom: 16,
+  },
+
+  reportInputLabel: {
+    color: "#34443a",
+    fontSize: 12,
+    fontWeight: "800",
+    marginBottom: 6,
+  },
+
+  reportSubjectInput: {
+    minHeight: 46,
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    color: "#1d3425",
+    marginBottom: 14,
+  },
+
+  reportDescriptionInput: {
+    minHeight: 130,
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+    padding: 12,
+    color: "#1d3425",
+    marginBottom: 18,
+  },
+
+  reportError: {
+    color: "#a12f2f",
+    backgroundColor: "#fff0f0",
+    borderColor: "#edcaca",
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 14,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+
+  reportModalButtons: {
+    flexDirection: "row",
+    gap: 10,
+  },
+
+  reportCancelButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+  },
+
+  reportCancelText: {
+    color: "#34443a",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  reportSubmitButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    backgroundColor: "#176b3a",
+  },
+
+  reportSubmitText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+
+  logoutModalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+
+  logoutModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    padding: 24,
+    backgroundColor: "#ffffff",
+  },
+
+  logoutModalTitle: {
+    color: "#176b3a",
+    fontSize: 20,
+    fontWeight: "800",
+    textAlign: "center",
+    marginBottom: 12,
+  },
+
+  logoutModalMessage: {
+    color: "#34443a",
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+
+  logoutModalButtons: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 24,
+  },
+
+  logoutCancelButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+  },
+
+  logoutCancelText: {
+    color: "#34443a",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  logoutConfirmButton: {
+    minHeight: 46,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "#b33a3a",
+  },
+
+  logoutConfirmText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
   },
 
   welcomeCard: {
@@ -2077,6 +3060,61 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+  },
+
+  readingHistoryCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#dcebdd",
+  },
+
+  readingHistoryTitle: {
+    color: "#153d27",
+    fontSize: 15,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+
+  readingHistoryEmpty: {
+    color: "#718076",
+    fontSize: 12,
+    paddingVertical: 8,
+  },
+
+  readingHistoryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#edf2ee",
+    paddingVertical: 10,
+  },
+
+  readingHistoryDetails: {
+    flex: 1,
+  },
+
+  readingHistoryDate: {
+    color: "#153d27",
+    fontSize: 12,
+    fontWeight: "800",
+    marginBottom: 3,
+  },
+
+  readingHistoryInfo: {
+    color: "#718076",
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  readingHistoryBill: {
+    color: "#176b3a",
+    fontSize: 13,
+    fontWeight: "900",
   },
 
   billLabel: {

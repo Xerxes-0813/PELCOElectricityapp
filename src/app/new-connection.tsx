@@ -3,7 +3,6 @@ import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import { useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -25,64 +24,49 @@ export default function NewConnectionScreen() {
   >("");
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const handlePhoneNumberChange = (text: string) => {
     const numbersOnly = text.replace(/[^0-9]/g, "");
     setContactNumber(numbersOnly.slice(0, 11));
+    setSubmitError(null);
   };
 
   const handleSubmit = async () => {
-    console.log("SUBMIT BUTTON PRESSED");
-
     if (submitting) {
       return;
     }
 
+    setSubmitError(null);
     const user = auth.currentUser;
 
     if (!user) {
-      Alert.alert(
-        "Not Logged In",
-        "Your session has expired. Please log in again."
-      );
+      setSubmitError("Your session has expired. Please log in again.");
       return;
     }
 
     if (!fullName.trim()) {
-      Alert.alert(
-        "Missing Information",
-        "Please enter your full name."
-      );
+      setSubmitError("Please enter your full name.");
       return;
     }
 
     if (contactNumber.length !== 11) {
-      Alert.alert(
-        "Invalid Mobile Number",
-        "Please enter an 11-digit mobile number."
-      );
+      setSubmitError("Please enter an 11-digit mobile number.");
       return;
     }
 
     if (!address.trim()) {
-      Alert.alert(
-        "Missing Information",
-        "Please enter your complete service address."
-      );
+      setSubmitError("Please enter your complete service address.");
       return;
     }
 
     if (!connectionType) {
-      Alert.alert(
-        "Missing Information",
-        "Please select a connection type."
-      );
+      setSubmitError("Please select a connection type.");
       return;
     }
 
     if (!confirmed) {
-      Alert.alert(
-        "Confirmation Required",
+      setSubmitError(
         "Please confirm that the information you provided is correct."
       );
       return;
@@ -90,8 +74,6 @@ export default function NewConnectionScreen() {
 
     try {
       setSubmitting(true);
-
-      console.log("Saving application to Firestore...");
 
       const applicationData = {
         customerId: user.uid,
@@ -106,22 +88,10 @@ export default function NewConnectionScreen() {
         updatedAt: serverTimestamp(),
       };
 
-      const applicationRef = await addDoc(
+      await addDoc(
         collection(db, "applications"),
         applicationData
       );
-
-      console.log(
-        "Application successfully saved:",
-        applicationRef.id
-      );
-
-      /*
-       * IMPORTANT:
-       * Firebase has already saved the application.
-       * Now immediately return to the customer dashboard.
-       */
-      setSubmitting(false);
 
       router.replace("/customer" as any);
     } catch (error: any) {
@@ -129,13 +99,12 @@ export default function NewConnectionScreen() {
       console.log("Error code:", error?.code);
       console.log("Error message:", error?.message);
 
-      setSubmitting(false);
-
-      Alert.alert(
-        "Submission Failed",
+      setSubmitError(
         error?.message ||
           "Something went wrong while submitting your application."
       );
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -177,7 +146,10 @@ export default function NewConnectionScreen() {
             placeholder="Enter your full name"
             placeholderTextColor="#8a9a90"
             value={fullName}
-            onChangeText={setFullName}
+            onChangeText={(value) => {
+              setFullName(value);
+              setSubmitError(null);
+            }}
             autoCapitalize="words"
           />
 
@@ -214,7 +186,10 @@ export default function NewConnectionScreen() {
             placeholder="House/Building No., Street, Barangay, City"
             placeholderTextColor="#8a9a90"
             value={address}
-            onChangeText={setAddress}
+            onChangeText={(value) => {
+              setAddress(value);
+              setSubmitError(null);
+            }}
             multiline
             numberOfLines={4}
             textAlignVertical="top"
@@ -236,9 +211,10 @@ export default function NewConnectionScreen() {
                 connectionType === "Residential" &&
                   styles.typeButtonSelected,
               ]}
-              onPress={() =>
-                setConnectionType("Residential")
-              }
+              onPress={() => {
+                setConnectionType("Residential");
+                setSubmitError(null);
+              }}
             >
               <Text
                 style={[
@@ -257,9 +233,10 @@ export default function NewConnectionScreen() {
                 connectionType === "Commercial" &&
                   styles.typeButtonSelected,
               ]}
-              onPress={() =>
-                setConnectionType("Commercial")
-              }
+              onPress={() => {
+                setConnectionType("Commercial");
+                setSubmitError(null);
+              }}
             >
               <Text
                 style={[
@@ -278,7 +255,10 @@ export default function NewConnectionScreen() {
         <View style={styles.confirmationCard}>
           <TouchableOpacity
             style={styles.checkboxRow}
-            onPress={() => setConfirmed(!confirmed)}
+            onPress={() => {
+              setConfirmed(!confirmed);
+              setSubmitError(null);
+            }}
             activeOpacity={0.8}
           >
             <View
@@ -300,6 +280,11 @@ export default function NewConnectionScreen() {
         </View>
 
         {/* SUBMIT */}
+        {submitError ? (
+          <Text accessibilityRole="alert" style={styles.submitError}>
+            {submitError}
+          </Text>
+        ) : null}
         <TouchableOpacity
           style={[
             styles.submitButton,
@@ -328,7 +313,7 @@ export default function NewConnectionScreen() {
         </TouchableOpacity>
 
         <Text style={styles.note}>
-          Your application will be reviewed by the PELCO
+          Your application will be reviewed by the Kur-yente CO
           administrator before proceeding to site inspection.
         </Text>
       </ScrollView>
@@ -533,6 +518,20 @@ const styles = StyleSheet.create({
 
   submitButtonDisabled: {
     opacity: 0.7,
+  },
+
+  submitError: {
+    color: "#a12f2f",
+    backgroundColor: "#fff0f0",
+    borderColor: "#edcaca",
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    marginHorizontal: 16,
+    marginTop: 16,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: "600",
   },
 
   submitButtonText: {

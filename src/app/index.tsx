@@ -136,7 +136,7 @@ export default function LoginScreen() {
             <Text style={styles.logoIcon}>⚡</Text>
           </View>
 
-          <Text style={styles.title}>PELCO</Text>
+          <Text style={styles.title}>Kur-yente CO</Text>
 
           <Text style={styles.subtitle}>
             Smart Electricity Management
@@ -230,12 +230,12 @@ export default function LoginScreen() {
           </TouchableOpacity>
 
           <Text style={styles.registerDescription}>
-            New customer? Create your PELCO electricity account.
+            New customer? Create your Kur-yente CO electricity account.
           </Text>
         </View>
 
         <Text style={styles.footerText}>
-          PELCO Smart Electricity Management System
+          Kur-yente CO Smart Electricity Management System
         </Text>
       </ScrollView>
       <Modal

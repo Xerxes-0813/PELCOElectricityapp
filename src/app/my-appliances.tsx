@@ -32,6 +32,7 @@ type Application = {
   customerId: string;
   status?: string;
   meterNumber?: string;
+  billingCycleStartedAt?: any;
 };
 
 type Appliance = {
@@ -257,13 +258,29 @@ export default function MyAppliancesScreen() {
     normalizedStatus === "active" &&
     !!application?.meterNumber;
 
+  const getTimestampMillis = (timestamp: any) => {
+    if (typeof timestamp?.toMillis === "function") {
+      return timestamp.toMillis();
+    }
+    if (timestamp instanceof Date) {
+      return timestamp.getTime();
+    }
+    return typeof timestamp === "number" ? timestamp : 0;
+  };
+
   /*
    * CALCULATE LIVE KWH
    */
   const getLiveKwh = (appliance: Appliance) => {
-    const savedKwh = Number(
-      appliance.totalKwh || 0
+    const billingCycleStartedAt = getTimestampMillis(
+      application?.billingCycleStartedAt
     );
+    const applianceUpdatedAt = getTimestampMillis(appliance.updatedAt);
+    const savedKwh =
+      billingCycleStartedAt > 0 &&
+      applianceUpdatedAt < billingCycleStartedAt
+        ? 0
+        : Number(appliance.totalKwh || 0);
 
     if (
       appliance.status !== "on" ||
@@ -292,6 +309,10 @@ export default function MyAppliancesScreen() {
 
     if (!turnedOnTime) {
       return savedKwh;
+    }
+
+    if (billingCycleStartedAt > 0) {
+      turnedOnTime = Math.max(turnedOnTime, billingCycleStartedAt);
     }
 
     const elapsedHours =
@@ -482,12 +503,21 @@ export default function MyAppliancesScreen() {
           "Appliance turned OFF."
         );
       } else {
+        const billingCycleStartedAt = getTimestampMillis(
+          application?.billingCycleStartedAt
+        );
+        const applianceUpdatedAt = getTimestampMillis(appliance.updatedAt);
+
         await updateDoc(
           applianceRef,
           {
             status: "on",
             turnedOnAt:
               serverTimestamp(),
+            ...(billingCycleStartedAt > 0 &&
+            applianceUpdatedAt < billingCycleStartedAt
+              ? { totalKwh: 0 }
+              : {}),
             updatedAt:
               serverTimestamp(),
           }
@@ -644,7 +674,7 @@ export default function MyAppliancesScreen() {
 
         <View style={styles.headerTextContainer}>
           <Text style={styles.headerSmall}>
-            PELCO
+            Kur-yente CO
           </Text>
 
           <Text style={styles.headerTitle}>

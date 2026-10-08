@@ -1,12 +1,14 @@
 import { router } from "expo-router";
+import { onAuthStateChanged } from "firebase/auth";
 import {
-    addDoc,
     collection,
     doc,
     onSnapshot,
     orderBy,
     query,
     updateDoc,
+    where,
+    writeBatch,
 } from "firebase/firestore";
 import { useEffect, useState } from "react";
 import {
@@ -55,6 +57,10 @@ type Application = {
   consumption?: number;
   readingRate?: number;
   estimatedBill?: number;
+  lastMeterReading?: number;
+  lastReadingConsumption?: number;
+  lastEstimatedBill?: number;
+  billingCycleStartedAt?: any;
   readingUpdatedAt?: any;
 };
 
@@ -70,6 +76,20 @@ type CustomerAppliance = {
   status: "on" | "off";
   turnedOnAt?: any;
   totalKwh?: number;
+  updatedAt?: any;
+};
+
+type AssignedReport = {
+  id: string;
+  subject: string;
+  description: string;
+  customerName: string;
+  assignedTechnicianId: string;
+  assignedTechnicianName: string;
+  fieldWorkStatus?: "in_progress" | "done" | "not_done";
+  fieldStaffUpdate?: string;
+  priority?: string;
+  createdAt?: any;
 };
 
 type ActionModalState = {
@@ -91,6 +111,14 @@ const generateMeterNumber = () => {
 
 export default function FieldStaffScreen() {
   const [applications, setApplications] = useState<Application[]>([]);
+  const [assignedReports, setAssignedReports] = useState<AssignedReport[]>([]);
+  const [assignedReportsExpanded, setAssignedReportsExpanded] = useState(false);
+  const [expandedAssignedReportIds, setExpandedAssignedReportIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [reportWorkNotes, setReportWorkNotes] = useState<Record<string, string>>(
+    {}
+  );
   const [loading, setLoading] = useState(true);
   const [readingInputs, setReadingInputs] = useState<ReadingInputs>({});
   const [savingReadingId, setSavingReadingId] = useState<string | null>(
@@ -156,6 +184,7 @@ export default function FieldStaffScreen() {
               status: data.status === "on" ? "on" : "off",
               turnedOnAt: data.turnedOnAt,
               totalKwh: Number(data.totalKwh || 0),
+              updatedAt: data.updatedAt,
             };
           }
         );
@@ -174,6 +203,65 @@ export default function FieldStaffScreen() {
   }, []);
 
   useEffect(() => {
+    let unsubscribeReports: (() => void) | undefined;
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      unsubscribeReports?.();
+      unsubscribeReports = undefined;
+      if (!user) {
+        setAssignedReports([]);
+        return;
+      }
+
+      const assignedReportsQuery = query(
+        collection(db, "reports"),
+        where("assignedTechnicianId", "==", user.uid)
+      );
+      unsubscribeReports = onSnapshot(
+        assignedReportsQuery,
+        (snapshot) => {
+          const reports: AssignedReport[] = snapshot.docs.map((reportDoc) => {
+            const data = reportDoc.data();
+            return {
+              id: reportDoc.id,
+              subject: String(data.subject || ""),
+              description: String(data.description || ""),
+              customerName: String(data.customerName || "Customer"),
+              assignedTechnicianId: String(data.assignedTechnicianId || ""),
+              assignedTechnicianName: String(data.assignedTechnicianName || ""),
+              fieldWorkStatus:
+                data.fieldWorkStatus === "done" ||
+                data.fieldWorkStatus === "not_done" ||
+                data.fieldWorkStatus === "in_progress"
+                  ? data.fieldWorkStatus
+                  : undefined,
+              fieldStaffUpdate: String(data.fieldStaffUpdate || ""),
+              priority: String(data.priority || "medium"),
+              createdAt: data.createdAt,
+            };
+          });
+          reports.sort(
+            (a, b) =>
+              (b.createdAt?.toMillis?.() || 0) -
+              (a.createdAt?.toMillis?.() || 0)
+          );
+          setAssignedReports(reports);
+        },
+        (error) => {
+          console.log("Assigned customer reports error:", error);
+          Alert.alert(
+            "Unable to Load Assigned Reports",
+            error.message || "Assigned customer reports could not be loaded."
+          );
+        }
+      );
+    });
+    return () => {
+      unsubscribeReports?.();
+      unsubscribeAuth();
+    };
+  }, []);
+
+  useEffect(() => {
     const interval = setInterval(() => setEnergyClock(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
@@ -188,6 +276,43 @@ export default function FieldStaffScreen() {
       }
       return next;
     });
+  };
+
+  const updateAssignedReport = async (
+    report: AssignedReport,
+    workStatus: NonNullable<AssignedReport["fieldWorkStatus"]>
+  ) => {
+    if (report.assignedTechnicianId !== auth.currentUser?.uid) {
+      Alert.alert(
+        "Report Not Assigned",
+        "Only the assigned field staff member can update this report."
+      );
+      return;
+    }
+    const fieldStaffUpdate = (reportWorkNotes[report.id] || "").trim();
+    const updateText = fieldStaffUpdate || report.fieldStaffUpdate || "";
+    const now = new Date();
+    try {
+      await updateDoc(doc(db, "reports", report.id), {
+        fieldWorkStatus: workStatus,
+        fieldStaffUpdate: updateText,
+        fieldStaffUpdatedAt: now,
+        updatedAt: now,
+      });
+      setReportWorkNotes((current) => ({ ...current, [report.id]: "" }));
+      Alert.alert(
+        "Report Updated",
+        `Work status saved as ${workStatus.replace("_", " ")}. Admin and customer report views will update.`
+      );
+    } catch (error) {
+      console.log("Assigned report work update error:", error);
+      Alert.alert(
+        "Unable to Update Report",
+        error instanceof Error
+          ? error.message
+          : "Your work update could not be saved."
+      );
+    }
   };
 
   const requestAction = (
@@ -236,11 +361,22 @@ export default function FieldStaffScreen() {
   };
 
   const getCustomerApplianceUsage = (customerId: string) => {
+    const application = applications.find(
+      (item) => item.customerId === customerId
+    );
+    const billingCycleStartedAt =
+      getTimestampMillis(application?.billingCycleStartedAt);
+
     return customerAppliances
       .filter((appliance) => appliance.customerId === customerId)
       .reduce(
         (usage, appliance) => {
-          const savedKwh = Number(appliance.totalKwh || 0);
+          const applianceUpdatedAt = getTimestampMillis(appliance.updatedAt);
+          const savedKwh =
+            billingCycleStartedAt > 0 &&
+            applianceUpdatedAt < billingCycleStartedAt
+              ? 0
+              : Number(appliance.totalKwh || 0);
           if (appliance.status !== "on" || !appliance.turnedOnAt) {
             return {
               kwh: usage.kwh + savedKwh,
@@ -262,6 +398,10 @@ export default function FieldStaffScreen() {
             console.log("Unable to read appliance start time:", error);
           }
 
+          if (billingCycleStartedAt > 0) {
+            turnedOnAt = Math.max(turnedOnAt, billingCycleStartedAt);
+          }
+
           const liveKwh =
             savedKwh +
             (turnedOnAt
@@ -278,6 +418,16 @@ export default function FieldStaffScreen() {
         },
         { kwh: 0, count: 0, onCount: 0 }
       );
+  };
+
+  const getTimestampMillis = (timestamp: any) => {
+    if (typeof timestamp?.toMillis === "function") {
+      return timestamp.toMillis();
+    }
+    if (timestamp instanceof Date) {
+      return timestamp.getTime();
+    }
+    return typeof timestamp === "number" ? timestamp : 0;
   };
 
   const formatDate = (value: any) => {
@@ -340,7 +490,7 @@ export default function FieldStaffScreen() {
         status: "inspection_passed",
         inspectionResult: "passed",
         inspectionNotes:
-          "Site inspection passed by PELCO field staff.",
+          "Site inspection passed by Kur-yente CO field staff.",
         inspectedAt: new Date(),
         updatedAt: new Date(),
       });
@@ -466,7 +616,10 @@ export default function FieldStaffScreen() {
       return;
     }
 
-    const previousReading = application.currentReading ?? 0;
+    const previousReading =
+      application.currentReading && application.currentReading > 0
+        ? application.currentReading
+        : application.previousReading ?? 0;
 
     if (newReading < previousReading) {
       setActionModal({
@@ -488,6 +641,38 @@ export default function FieldStaffScreen() {
       async () => {
       setSavingReadingId(application.id);
       try {
+      const readingSavedAt = new Date();
+      const batch = writeBatch(db);
+      batch.update(doc(db, "applications", application.id), {
+        previousReading: newReading,
+        currentReading: 0,
+        consumption: 0,
+        readingRate: ELECTRICITY_RATE,
+        estimatedBill: 0,
+        lastMeterReading: newReading,
+        lastReadingConsumption: consumption,
+        lastEstimatedBill: estimatedBill,
+        billingCycleStartedAt: readingSavedAt,
+        readingUpdatedAt: readingSavedAt,
+        updatedAt: readingSavedAt,
+      });
+
+      const readingRef = doc(collection(db, "meterReadings"));
+      batch.set(readingRef, {
+        applicationId: application.id,
+        customerId: application.customerId,
+        customerEmail: application.customerEmail,
+        fullName: application.fullName,
+        meterNumber: application.meterNumber || "",
+        previousReading,
+        currentReading: newReading,
+        consumption,
+        electricityRate: ELECTRICITY_RATE,
+        estimatedBill,
+        readingDate: readingSavedAt,
+        createdAt: readingSavedAt,
+      });
+
       console.log("Saving simulated meter reading:", {
         applicationId: application.id,
         meterNumber: application.meterNumber,
@@ -498,34 +683,7 @@ export default function FieldStaffScreen() {
         estimatedBill,
       });
 
-      await updateDoc(doc(db, "applications", application.id), {
-        previousReading,
-        currentReading: newReading,
-        consumption,
-        readingRate: ELECTRICITY_RATE,
-        estimatedBill,
-        readingUpdatedAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      await addDoc(collection(db, "meterReadings"), {
-        applicationId: application.id,
-        customerId: application.customerId,
-        customerEmail: application.customerEmail,
-
-        fullName: application.fullName,
-        meterNumber: application.meterNumber || "",
-
-        previousReading,
-        currentReading: newReading,
-        consumption,
-
-        electricityRate: ELECTRICITY_RATE,
-        estimatedBill,
-
-        readingDate: new Date(),
-        createdAt: new Date(),
-      });
+      await batch.commit();
 
       setReadingInputs((current) => ({
         ...current,
@@ -536,8 +694,6 @@ export default function FieldStaffScreen() {
           2
         )} kWh\nCurrent: ${newReading.toFixed(
           2
-        )} kWh\nConsumption: ${consumption.toFixed(
-          2
         )} kWh\nEstimated Bill: ${formatCurrency(estimatedBill)}`;
       } finally {
         setSavingReadingId(null);
@@ -546,18 +702,17 @@ export default function FieldStaffScreen() {
     );
   };
 
-  const handleLogout = async () => {
-    try {
-      await auth.signOut();
-      router.replace("/");
-    } catch (error) {
-      console.log("Logout error:", error);
-
-      Alert.alert(
-        "Logout Error",
-        "Unable to log out right now. Please try again."
-      );
-    }
+  const handleLogout = () => {
+    requestAction(
+      "Log Out",
+      "Are you sure you want to log out?",
+      "Log Out",
+      async () => {
+        await auth.signOut();
+        router.replace("/");
+        return "You have been logged out.";
+      }
+    );
   };
 
   const inspectionApplications = applications.filter(
@@ -600,7 +755,7 @@ export default function FieldStaffScreen() {
         <View style={styles.header}>
           <View>
             <Text style={styles.headerLabel}>
-              PELCO FIELD STAFF PORTAL
+              Kur-yente CO FIELD STAFF PORTAL
             </Text>
 
             <Text style={styles.headerTitle}>
@@ -661,6 +816,125 @@ export default function FieldStaffScreen() {
             </Text>
           </View>
         </View>
+
+        {/* ASSIGNED CUSTOMER REPORTS */}
+        <TouchableOpacity
+          style={styles.sectionHeader}
+          onPress={() => setAssignedReportsExpanded((expanded) => !expanded)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: assignedReportsExpanded }}
+        >
+          <Text style={styles.sectionTitle}>Assigned Customer Reports</Text>
+          <View style={styles.reportSectionHeaderRight}>
+            <Text style={styles.sectionCount}>
+              {assignedReports.length} report
+              {assignedReports.length !== 1 ? "s" : ""}
+            </Text>
+            <Text style={styles.reportSectionChevron}>
+              {assignedReportsExpanded ? "−" : "+"}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        {assignedReportsExpanded && assignedReports.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyTitle}>No Assigned Reports</Text>
+            <Text style={styles.emptyText}>
+              Reports assigned to you by an administrator will appear here.
+            </Text>
+          </View>
+        ) : null}
+        {assignedReportsExpanded && assignedReports.length > 0 ? (
+          assignedReports.map((report) => (
+            <View key={report.id} style={styles.reportWorkCard}>
+              <TouchableOpacity
+                style={styles.reportWorkHeader}
+                onPress={() =>
+                  setExpandedAssignedReportIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(report.id)) next.delete(report.id);
+                    else next.add(report.id);
+                    return next;
+                  })
+                }
+                accessibilityRole="button"
+                accessibilityState={{
+                  expanded: expandedAssignedReportIds.has(report.id),
+                }}
+              >
+                <Text style={styles.reportWorkSubject}>{report.subject}</Text>
+                <View style={styles.reportWorkHeaderMeta}>
+                  <Text style={styles.reportWorkPriority}>
+                    {report.priority?.toUpperCase()}
+                  </Text>
+                  <Text style={styles.reportSectionChevron}>
+                    {expandedAssignedReportIds.has(report.id) ? "−" : "+"}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+              {expandedAssignedReportIds.has(report.id) ? (
+                <View>
+              <Text style={styles.reportWorkCustomer}>{report.customerName}</Text>
+              <Text style={styles.reportWorkDescription}>
+                {report.description}
+              </Text>
+              <Text style={styles.reportWorkStatus}>
+                Work status:{" "}
+                {report.fieldWorkStatus
+                  ? report.fieldWorkStatus.replace("_", " ").toUpperCase()
+                  : "NOT UPDATED"}
+              </Text>
+              {report.fieldStaffUpdate ? (
+                <Text style={styles.reportWorkUpdate}>
+                  Latest update: {report.fieldStaffUpdate}
+                </Text>
+              ) : null}
+              <TextInput
+                style={styles.reportWorkInput}
+                value={reportWorkNotes[report.id] || ""}
+                onChangeText={(value) =>
+                  setReportWorkNotes((current) => ({
+                    ...current,
+                    [report.id]: value,
+                  }))
+                }
+                placeholder="Work performed or reason the work is not done (optional)"
+                placeholderTextColor="#829087"
+                multiline
+                textAlignVertical="top"
+                maxLength={2000}
+              />
+              <View style={styles.reportWorkActions}>
+                <TouchableOpacity
+                  style={[styles.reportWorkButton, styles.reportInProgressButton]}
+                  onPress={() =>
+                    void updateAssignedReport(report, "in_progress")
+                  }
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.reportWorkButtonText}>
+                    Work in Progress
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.reportWorkButton, styles.reportDoneButton]}
+                  onPress={() => void updateAssignedReport(report, "done")}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.reportWorkButtonText}>Work Done</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.reportWorkButton, styles.reportNotDoneButton]}
+                  onPress={() => void updateAssignedReport(report, "not_done")}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.reportWorkButtonText}>Work Not Done</Text>
+                </TouchableOpacity>
+              </View>
+                </View>
+              ) : null}
+            </View>
+          ))
+        ) : null}
 
         {/* INSPECTION QUEUE */}
         <View style={styles.sectionHeader}>
@@ -884,7 +1158,7 @@ export default function FieldStaffScreen() {
 
                 <Text style={styles.inspectionResultText}>
                   {application.inspectionNotes ||
-                    "Site inspection passed by PELCO field staff."}
+                    "Site inspection passed by Kur-yente CO field staff."}
                 </Text>
 
                 <Text style={styles.inspectionDate}>
@@ -932,17 +1206,22 @@ export default function FieldStaffScreen() {
           </View>
         ) : (
           installedApplications.map((application) => {
-            const previousReading =
-              application.currentReading ?? 0;
-
             const currentReading =
               application.currentReading ?? 0;
 
-            const consumption =
-              application.consumption ?? 0;
-
             const estimatedBill =
               application.estimatedBill ?? 0;
+
+            const lastMeterReading =
+              application.lastMeterReading ??
+              (application.currentReading && application.currentReading > 0
+                ? application.currentReading
+                : application.previousReading ?? 0);
+
+            const lastEstimatedBill =
+              application.lastEstimatedBill ??
+              application.estimatedBill ??
+              0;
 
             const isSaving =
               savingReadingId === application.id;
@@ -1054,30 +1333,27 @@ export default function FieldStaffScreen() {
                   </Text>
 
                   <Text style={styles.currentReadingSubtext}>
-                    Previous reading:{" "}
-                    {formatKwh(previousReading)}
+                    Your Meter Reading:{" "}
+                    {formatKwh(lastMeterReading)}
                   </Text>
                 </View>
 
-                {/* CONSUMPTION */}
                 <View style={styles.readingSummary}>
                   <View style={styles.readingSummaryItem}>
                     <Text style={styles.readingSummaryLabel}>
-                      Consumption
-                    </Text>
-
-                    <Text style={styles.readingSummaryValue}>
-                      {formatKwh(consumption)}
-                    </Text>
-                  </View>
-
-                  <View style={styles.readingSummaryItem}>
-                    <Text style={styles.readingSummaryLabel}>
-                      Estimated Bill
+                      Estimated Bill This Cycle
                     </Text>
 
                     <Text style={styles.readingBillValue}>
                       {formatCurrency(estimatedBill)}
+                    </Text>
+                  </View>
+                  <View style={styles.readingSummaryItem}>
+                    <Text style={styles.readingSummaryLabel}>
+                      Previous Bill
+                    </Text>
+                    <Text style={styles.readingBillValue}>
+                      {formatCurrency(lastEstimatedBill)}
                     </Text>
                   </View>
                 </View>
@@ -1091,8 +1367,8 @@ export default function FieldStaffScreen() {
                       </Text>
 
                       <Text style={styles.simulationDescription}>
-                        Enter the latest meter reading to calculate
-                        consumption and estimated bill.
+                        Enter the latest meter reading to calculate the
+                        estimated bill.
                       </Text>
                     </View>
 
@@ -1168,11 +1444,7 @@ export default function FieldStaffScreen() {
                     </Text>
 
                     <Text style={styles.calculationText}>
-                      New Reading − Previous Reading = Consumption
-                    </Text>
-
-                    <Text style={styles.calculationText}>
-                      Consumption × ₱
+                      Meter reading difference × ₱
                       {ELECTRICITY_RATE.toFixed(2)} = Estimated Bill
                     </Text>
                   </View>
@@ -1222,7 +1494,7 @@ export default function FieldStaffScreen() {
         </View>
 
         <Text style={styles.footerText}>
-          PELCO Electricity Management System
+          Kur-yente CO Electricity Management System
         </Text>
       </ScrollView>
       <Modal
@@ -1414,6 +1686,134 @@ const styles = StyleSheet.create({
     color: "#789080",
     fontSize: 11,
     fontWeight: "700",
+  },
+
+  reportSectionHeaderRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  reportSectionChevron: {
+    color: "#176b3a",
+    fontSize: 18,
+    fontWeight: "900",
+    minWidth: 18,
+    textAlign: "center",
+  },
+
+  reportWorkCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#cfe3d4",
+  },
+
+  reportWorkHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+
+  reportWorkHeaderMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  reportWorkSubject: {
+    flex: 1,
+    color: "#153d27",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  reportWorkPriority: {
+    color: "#8a5b08",
+    backgroundColor: "#fff2cf",
+    borderRadius: 10,
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 9,
+    fontWeight: "900",
+  },
+
+  reportWorkCustomer: {
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 7,
+  },
+
+  reportWorkDescription: {
+    color: "#526258",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 7,
+  },
+
+  reportWorkStatus: {
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "900",
+    marginTop: 10,
+  },
+
+  reportWorkUpdate: {
+    color: "#526258",
+    fontSize: 11,
+    lineHeight: 17,
+    marginTop: 5,
+  },
+
+  reportWorkInput: {
+    minHeight: 74,
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+    padding: 10,
+    color: "#1d3425",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 10,
+  },
+
+  reportWorkActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 7,
+    marginTop: 9,
+  },
+
+  reportWorkButton: {
+    minHeight: 38,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 9,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+
+  reportInProgressButton: {
+    backgroundColor: "#1557a0",
+  },
+
+  reportDoneButton: {
+    backgroundColor: "#176b3a",
+  },
+
+  reportNotDoneButton: {
+    backgroundColor: "#a45b08",
+  },
+
+  reportWorkButtonText: {
+    color: "#ffffff",
+    fontSize: 10,
+    fontWeight: "800",
   },
 
   applicationCard: {

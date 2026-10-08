@@ -1,6 +1,7 @@
 import { router } from "expo-router";
 import { signOut } from "firebase/auth";
 import {
+  addDoc,
   collection,
   deleteDoc,
   doc,
@@ -17,6 +18,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -49,6 +51,10 @@ type Application = {
   consumption?: number;
   readingRate?: number;
   estimatedBill?: number;
+  lastMeterReading?: number;
+  lastReadingConsumption?: number;
+  lastEstimatedBill?: number;
+  billingCycleStartedAt?: any;
   readingUpdatedAt?: any;
 };
 
@@ -63,6 +69,51 @@ type Appliance = {
   totalKwh?: number;
   createdAt?: any;
   updatedAt?: any;
+};
+
+type MeterReading = {
+  id: string;
+  applicationId: string;
+  currentReading: number;
+  consumption: number;
+  estimatedBill: number;
+  readingDate?: any;
+};
+
+type CustomerReport = {
+  id: string;
+  customerId: string;
+  customerName: string;
+  customerEmail: string;
+  subject: string;
+  description: string;
+  status:
+    | "pending"
+    | "under_review"
+    | "assigned"
+    | "in_progress"
+    | "resolved"
+    | "closed"
+    | "rejected"
+    | "not_resolved";
+  priority?: "low" | "medium" | "high" | "emergency";
+  assignedTechnicianId?: string;
+  assignedTechnicianName?: string;
+  fieldWorkStatus?: "in_progress" | "done" | "not_done";
+  fieldStaffUpdate?: string;
+  fieldStaffUpdatedAt?: any;
+  customerUpdate?: string;
+  contactPhone?: string;
+  otherContacts?: string;
+  resolution?: string;
+  createdAt?: any;
+};
+
+type ReportInternalNote = {
+  id: string;
+  text: string;
+  author: string;
+  createdAt?: any;
 };
 
 type ManagedUser = {
@@ -89,6 +140,24 @@ type ActionModalState = {
 export default function AdminScreen() {
   const [applications, setApplications] = useState<Application[]>([]);
   const [appliances, setAppliances] = useState<Appliance[]>([]);
+  const [meterReadings, setMeterReadings] = useState<MeterReading[]>([]);
+  const [customerReports, setCustomerReports] = useState<CustomerReport[]>([]);
+  const [reportResolutionInputs, setReportResolutionInputs] = useState<
+    Record<string, string>
+  >({});
+  const [reportCustomerUpdates, setReportCustomerUpdates] = useState<
+    Record<string, string>
+  >({});
+  const [reportInternalNotes, setReportInternalNotes] = useState<
+    Record<string, string>
+  >({});
+  const [savedReportInternalNotes, setSavedReportInternalNotes] = useState<
+    Record<string, ReportInternalNote[]>
+  >({});
+  const [expandedReportIds, setExpandedReportIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const reportIds = customerReports.map((report) => report.id).join("\u001f");
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [userManagementExpanded, setUserManagementExpanded] =
@@ -155,6 +224,15 @@ export default function AdminScreen() {
    * can calculate the customer's current live KWh.
    */
   const [clock, setClock] = useState(Date.now());
+  const getTimestampMillis = (timestamp: any) => {
+    if (typeof timestamp?.toMillis === "function") {
+      return timestamp.toMillis();
+    }
+    if (timestamp instanceof Date) {
+      return timestamp.getTime();
+    }
+    return typeof timestamp === "number" ? timestamp : 0;
+  };
 
   /*
    * ---------------------------------------------------------
@@ -207,6 +285,144 @@ export default function AdminScreen() {
 
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const readingsQuery = query(collection(db, "meterReadings"));
+
+    const unsubscribe = onSnapshot(
+      readingsQuery,
+      (snapshot) => {
+        const readings: MeterReading[] = snapshot.docs.map((document) => {
+          const data = document.data();
+          return {
+            id: document.id,
+            applicationId: String(data.applicationId || ""),
+            currentReading: Number(data.currentReading || 0),
+            consumption: Number(data.consumption || 0),
+            estimatedBill: Number(data.estimatedBill || 0),
+            readingDate: data.readingDate || data.createdAt,
+          };
+        });
+        readings.sort((a, b) => {
+          const aTime = a.readingDate?.toMillis?.() || 0;
+          const bTime = b.readingDate?.toMillis?.() || 0;
+          return bTime - aTime;
+        });
+        setMeterReadings(readings);
+      },
+      (error) => {
+        console.log("Admin meter reading history error:", error);
+        Alert.alert(
+          "Unable to Load Meter Reading History",
+          error.message || "Something went wrong while loading meter readings."
+        );
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const reportsQuery = query(collection(db, "reports"));
+    const unsubscribe = onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const reports: CustomerReport[] = snapshot.docs.map((document) => {
+          const data = document.data();
+          return {
+            id: document.id,
+            customerId: String(data.customerId || ""),
+            customerName: String(data.customerName || "Customer"),
+            customerEmail: String(data.customerEmail || ""),
+            subject: String(data.subject || ""),
+            description: String(data.description || ""),
+            status: [
+              "pending",
+              "under_review",
+              "assigned",
+              "in_progress",
+              "resolved",
+              "closed",
+              "rejected",
+            ].includes(data.status)
+              ? data.status
+              : "pending",
+            priority: ["low", "medium", "high", "emergency"].includes(
+              data.priority
+            )
+              ? data.priority
+              : "medium",
+            assignedTechnicianId: String(data.assignedTechnicianId || ""),
+            assignedTechnicianName: String(data.assignedTechnicianName || ""),
+            fieldWorkStatus:
+              data.fieldWorkStatus === "in_progress" ||
+              data.fieldWorkStatus === "done" ||
+              data.fieldWorkStatus === "not_done"
+                ? data.fieldWorkStatus
+                : undefined,
+            fieldStaffUpdate: String(data.fieldStaffUpdate || ""),
+            fieldStaffUpdatedAt: data.fieldStaffUpdatedAt,
+            customerUpdate: String(data.customerUpdate || ""),
+            contactPhone: String(data.contactPhone || ""),
+            otherContacts: String(data.otherContacts || ""),
+            resolution: String(data.resolution || ""),
+            createdAt: data.createdAt,
+          };
+        });
+        reports.sort((a, b) => {
+          const aTime = a.createdAt?.toMillis?.() || 0;
+          const bTime = b.createdAt?.toMillis?.() || 0;
+          return bTime - aTime;
+        });
+        setCustomerReports(reports);
+      },
+      (error) => {
+        console.log("Admin customer reports loading error:", error);
+        Alert.alert(
+          "Unable to Load Customer Reports",
+          error.message || "Something went wrong while loading customer reports."
+        );
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!reportIds) {
+      return;
+    }
+    const unsubscribes = reportIds.split("\u001f").map((reportId) =>
+      onSnapshot(
+        query(
+          collection(db, "reports", reportId, "internalNotes"),
+          orderBy("createdAt", "asc")
+        ),
+        (snapshot) => {
+          const notes: ReportInternalNote[] = snapshot.docs.map((noteDoc) => {
+            const data = noteDoc.data();
+            return {
+              id: noteDoc.id,
+              text: String(data.text || ""),
+              author: String(data.author || "Admin"),
+              createdAt: data.createdAt,
+            };
+          });
+          setSavedReportInternalNotes((current) => ({
+            ...current,
+            [reportId]: notes,
+          }));
+        },
+        (error) => {
+          console.log("Admin internal report notes error:", error);
+          Alert.alert(
+            "Unable to Load Internal Notes",
+            error.message || "The report's internal notes could not be loaded."
+          );
+        }
+      )
+    );
+    return () => unsubscribes.forEach((unsubscribe) => unsubscribe());
+  }, [reportIds]);
 
   /*
    * ---------------------------------------------------------
@@ -321,9 +537,16 @@ export default function AdminScreen() {
    * Existing saved KWh is included as well.
    */
   const getLiveKwh = (appliance: Appliance) => {
-    const savedKwh = Number(
-      appliance.totalKwh || 0
+    const customerCycleStart = getTimestampMillis(
+      applications.find(
+        (application) => application.customerId === appliance.customerId
+      )?.billingCycleStartedAt
     );
+    const applianceUpdatedAt = getTimestampMillis(appliance.updatedAt);
+    const savedKwh =
+      customerCycleStart > 0 && applianceUpdatedAt < customerCycleStart
+        ? 0
+        : Number(appliance.totalKwh || 0);
 
     if (
       appliance.status !== "on" ||
@@ -361,6 +584,10 @@ export default function AdminScreen() {
 
     if (!turnedOnTime) {
       return savedKwh;
+    }
+
+    if (customerCycleStart > 0) {
+      turnedOnTime = Math.max(turnedOnTime, customerCycleStart);
     }
 
     const elapsedMilliseconds =
@@ -569,7 +796,7 @@ export default function AdminScreen() {
         await updateDoc(doc(db, "applications", application.id), {
           status: "rejected",
           rejectionReason:
-            "Application was rejected by the PELCO administrator.",
+            "Application was rejected by the Kur-yente CO administrator.",
           reviewedAt,
           updatedAt: reviewedAt,
         });
@@ -644,6 +871,119 @@ export default function AdminScreen() {
     );
   };
 
+  const handleReportStatusChange = async (
+    report: CustomerReport,
+    nextStatus: CustomerReport["status"]
+  ) => {
+    const resolution = (
+      reportResolutionInputs[report.id] ??
+      report.resolution ??
+      ""
+    ).trim();
+
+    if (nextStatus === "resolved" && !resolution) {
+      Alert.alert(
+        "Resolution Details Required",
+        "Describe how the issue was resolved before marking the report as resolved."
+      );
+      return;
+    }
+
+    const customerUpdate = (
+      reportCustomerUpdates[report.id] ??
+      report.customerUpdate ??
+      ""
+    ).trim();
+    if (nextStatus === "rejected" && !customerUpdate) {
+      Alert.alert(
+        "Rejection Reason Required",
+        "Add a customer update explaining why this report is being rejected."
+      );
+      return;
+    }
+
+    try {
+      const now = new Date();
+      await updateDoc(doc(db, "reports", report.id), {
+        status: nextStatus,
+        ...(nextStatus === "resolved" ? { resolution } : {}),
+        ...(nextStatus === "resolved" ? { resolvedAt: now } : {}),
+        ...(nextStatus === "closed" ? { closedAt: now } : {}),
+        ...(nextStatus === "under_review" ? { acceptedAt: now } : {}),
+        ...(nextStatus === "rejected" ? { customerUpdate } : {}),
+        updatedAt: now,
+      });
+    } catch (error) {
+      console.log("Customer report status update error:", error);
+      Alert.alert(
+        "Unable to Update Report",
+        error instanceof Error
+          ? error.message
+          : "The report status could not be updated."
+      );
+    }
+  };
+
+  const updateReport = async (
+    reportId: string,
+    fields: Record<string, unknown>
+  ) => {
+    try {
+      await updateDoc(doc(db, "reports", reportId), {
+        ...fields,
+        updatedAt: new Date(),
+      });
+      return true;
+    } catch (error) {
+      console.log("Customer report update error:", error);
+      Alert.alert(
+        "Unable to Update Report",
+        error instanceof Error
+          ? error.message
+          : "The report could not be updated."
+      );
+      return false;
+    }
+  };
+
+  const addReportInternalNote = async (report: CustomerReport) => {
+    const text = (reportInternalNotes[report.id] || "").trim();
+    if (!text) {
+      Alert.alert("Note Required", "Enter an internal note before saving.");
+      return;
+    }
+    try {
+      await addDoc(collection(db, "reports", report.id, "internalNotes"), {
+        text,
+        author: auth.currentUser?.displayName || auth.currentUser?.email || "Admin",
+        createdAt: new Date(),
+      });
+      setReportInternalNotes((current) => ({ ...current, [report.id]: "" }));
+    } catch (error) {
+      console.log("Admin internal report note error:", error);
+      Alert.alert(
+        "Unable to Save Internal Note",
+        error instanceof Error
+          ? error.message
+          : "The internal note could not be saved."
+      );
+    }
+  };
+
+  const sendReportCustomerUpdate = async (report: CustomerReport) => {
+    const message = (reportCustomerUpdates[report.id] || "").trim();
+    if (!message) {
+      Alert.alert(
+        "Update Required",
+        "Enter the message you want the customer to receive."
+      );
+      return;
+    }
+    if (await updateReport(report.id, { customerUpdate: message })) {
+      setReportCustomerUpdates((current) => ({ ...current, [report.id]: "" }));
+    }
+  };
+
   const handleApplicationDelete = (
     application: Application
   ) => {
@@ -664,26 +1004,24 @@ export default function AdminScreen() {
    * LOGOUT
    * ---------------------------------------------------------
    */
-  const handleLogout = async () => {
-    try {
-      setLoggingOut(true);
+  const handleLogout = () => {
+    requestAction(
+      "Log Out",
+      "Are you sure you want to log out?",
+      "Log Out",
+      async () => {
+        setLoggingOut(true);
 
-      await signOut(auth);
-
-      router.replace("/" as any);
-    } catch (error) {
-      console.log(
-        "Logout error:",
-        error
-      );
-
-      Alert.alert(
-        "Error",
-        "Unable to logout."
-      );
-
-      setLoggingOut(false);
-    }
+        try {
+          await signOut(auth);
+          router.replace("/" as any);
+          return "You have been logged out.";
+        } catch (error) {
+          setLoggingOut(false);
+          throw error;
+        }
+      }
+    );
   };
 
   /*
@@ -712,6 +1050,11 @@ export default function AdminScreen() {
           "active" &&
         !!application.meterNumber
     );
+
+  const connectionApplications = applications.filter(
+    (application) =>
+      application.status.toLowerCase() !== "active"
+  );
 
   const inspectionApplications =
     applications.filter(
@@ -880,7 +1223,7 @@ export default function AdminScreen() {
         <View style={styles.header}>
           <View>
             <Text style={styles.smallTitle}>
-              PELCO SYSTEM
+              Kur-yente CO
             </Text>
 
             <Text style={styles.title}>
@@ -943,6 +1286,373 @@ export default function AdminScreen() {
             )}
           </View>
         ) : null}
+
+        <View style={styles.reportsSection}>
+          <View style={styles.reportsSectionHeader}>
+            <View>
+              <Text style={styles.reportsSectionTitle}>Customer Reports</Text>
+              <Text style={styles.reportsSectionSubtitle}>
+                Reports submitted by customers
+              </Text>
+            </View>
+            <Text style={styles.reportsCount}>{customerReports.length}</Text>
+          </View>
+          {customerReports.length === 0 ? (
+            <View style={styles.reportEmptyCard}>
+              <Text style={styles.reportEmptyText}>
+                No customer reports have been received.
+              </Text>
+            </View>
+          ) : (
+            customerReports.map((report) => (
+              <View key={report.id} style={styles.reportCard}>
+                <TouchableOpacity
+                  style={styles.reportCardHeader}
+                  onPress={() =>
+                    setExpandedReportIds((current) => {
+                      const next = new Set(current);
+                      if (next.has(report.id)) next.delete(report.id);
+                      else next.add(report.id);
+                      return next;
+                    })
+                  }
+                  accessibilityRole="button"
+                  accessibilityState={{
+                    expanded: expandedReportIds.has(report.id),
+                  }}
+                >
+                  <Text style={styles.reportSubject}>{report.subject}</Text>
+                  <View style={styles.reportHeaderMeta}>
+                    <Text
+                      style={[
+                        styles.reportStatus,
+                        styles[
+                          `reportStatus${report.status
+                            .split("_")
+                            .map((part) =>
+                              part.charAt(0).toUpperCase() + part.slice(1)
+                            )
+                            .join("")}` as keyof typeof styles
+                        ],
+                      ]}
+                    >
+                      {report.status.replace("_", " ").toUpperCase()}
+                    </Text>
+                    <Text style={styles.reportDate}>
+                      Submitted {formatDateTime(report.createdAt)}
+                    </Text>
+                      <Text style={styles.reportDropdownIcon}>
+                      {expandedReportIds.has(report.id) ? "−" : "+"}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+                <Text style={styles.reportWorkPreview}>
+                    Field work:{" "}
+                    {report.fieldWorkStatus
+                      ? report.fieldWorkStatus.replace("_", " ").toUpperCase()
+                      : "NOT UPDATED"}
+                </Text>
+                {expandedReportIds.has(report.id) ? (
+                  <View>
+                <Text style={styles.reportCustomerName}>
+                  {report.customerName}
+                  {report.customerEmail ? ` · ${report.customerEmail}` : ""}
+                </Text>
+                <Text style={styles.reportAssignee}>
+                  {report.assignedTechnicianName
+                    ? `Assigned to ${report.assignedTechnicianName}`
+                    : "No technician assigned"}
+                </Text>
+                <View style={styles.reportFieldWorkBox}>
+                  <Text style={styles.reportControlLabel}>Field Staff Work</Text>
+                  <Text style={styles.reportDetailValue}>
+                    {report.fieldWorkStatus
+                      ? report.fieldWorkStatus.replace("_", " ").toUpperCase()
+                      : "NOT UPDATED"}
+                    {report.fieldStaffUpdatedAt
+                      ? ` · ${formatDateTime(report.fieldStaffUpdatedAt)}`
+                      : ""}
+                  </Text>
+                  {report.fieldStaffUpdate ? (
+                    <Text style={styles.reportFieldWorkUpdate}>
+                      {report.fieldStaffUpdate}
+                    </Text>
+                  ) : null}
+                </View>
+                <View style={styles.reportFieldWorkBox}>
+                  <Text style={styles.reportDetailLabel}>Description</Text>
+                  <Text style={styles.reportDescription}>
+                    {report.description}
+                  </Text>
+                  <Text style={styles.reportDetailLabel}>Contact Email</Text>
+                  <Text style={styles.reportDetailValue}>
+                    {report.customerEmail || "Not provided"}
+                  </Text>
+                  <Text style={styles.reportDetailLabel}>Phone Number</Text>
+                  <Text style={styles.reportDetailValue}>
+                    {report.contactPhone || "Not provided"}
+                  </Text>
+                  <Text style={styles.reportDetailLabel}>Other Contacts</Text>
+                  <Text style={styles.reportDetailValue}>
+                    {report.otherContacts || "None provided"}
+                  </Text>
+                </View>
+                <Text style={styles.reportControlLabel}>Priority</Text>
+                <View style={styles.reportOptionRow}>
+                  {(["low", "medium", "high", "emergency"] as const).map(
+                    (priority) => (
+                      <TouchableOpacity
+                        key={priority}
+                        style={[
+                          styles.reportOption,
+                          report.priority === priority &&
+                            styles.reportOptionSelected,
+                        ]}
+                        onPress={() =>
+                          void updateReport(report.id, { priority })
+                        }
+                        accessibilityRole="button"
+                      >
+                        <Text
+                          style={[
+                            styles.reportOptionText,
+                            report.priority === priority &&
+                              styles.reportOptionTextSelected,
+                          ]}
+                        >
+                          {priority.toUpperCase()}
+                        </Text>
+                      </TouchableOpacity>
+                    )
+                  )}
+                </View>
+
+                <Text style={styles.reportControlLabel}>Update Status</Text>
+                <View style={styles.reportOptionRow}>
+                  {(
+                    [
+                      "pending",
+                      "under_review",
+                      "assigned",
+                      "in_progress",
+                      "resolved",
+                      "closed",
+                    ] as const
+                  ).map((status) => (
+                    <TouchableOpacity
+                      key={status}
+                      style={[
+                        styles.reportOption,
+                        report.status === status && styles.reportOptionSelected,
+                      ]}
+                      onPress={() =>
+                        void handleReportStatusChange(report, status)
+                      }
+                      accessibilityRole="button"
+                    >
+                      <Text
+                        style={[
+                          styles.reportOptionText,
+                          report.status === status &&
+                            styles.reportOptionTextSelected,
+                        ]}
+                      >
+                        {status.replace("_", " ").toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <TouchableOpacity
+                  style={[styles.reportActionButton, styles.reportAcceptButton]}
+                  onPress={() =>
+                    void handleReportStatusChange(report, "under_review")
+                  }
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.reportActionButtonText}>
+                    Accept Report
+                  </Text>
+                </TouchableOpacity>
+
+                <Text style={styles.reportControlLabel}>Assign Technician</Text>
+                {staffUsers.filter(
+                  (user) =>
+                    user.role.toLowerCase() === "field-staff" &&
+                    isManagedUserActive(user)
+                ).length ? (
+                  <View style={styles.reportOptionRow}>
+                    {staffUsers
+                      .filter(
+                        (user) =>
+                          user.role.toLowerCase() === "field-staff" &&
+                          isManagedUserActive(user)
+                      )
+                      .map((staff) => {
+                        const name = getManagedUserName(staff);
+                        const assigned =
+                          report.assignedTechnicianId === staff.id;
+                        return (
+                          <TouchableOpacity
+                            key={staff.id}
+                            style={[
+                              styles.reportOption,
+                              assigned && styles.reportOptionSelected,
+                            ]}
+                            onPress={() =>
+                              void updateReport(report.id, {
+                                assignedTechnicianId: staff.id,
+                                assignedTechnicianName: name,
+                                status: "assigned",
+                              })
+                            }
+                            accessibilityRole="button"
+                          >
+                            <Text
+                              style={[
+                                styles.reportOptionText,
+                                assigned && styles.reportOptionTextSelected,
+                              ]}
+                            >
+                              {name}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                  </View>
+                ) : (
+                  <Text style={styles.reportDetailValue}>
+                    No field technicians are available to assign.
+                  </Text>
+                )}
+
+                <Text style={styles.reportControlLabel}>
+                  Customer Update / Rejection Reason
+                </Text>
+                <TextInput
+                  style={styles.reportResolutionInput}
+                  value={
+                    reportCustomerUpdates[report.id] ??
+                    report.customerUpdate ??
+                    ""
+                  }
+                  onChangeText={(value) =>
+                    setReportCustomerUpdates((current) => ({
+                      ...current,
+                      [report.id]: value,
+                    }))
+                  }
+                  placeholder="Ask for more information or explain a rejection"
+                  placeholderTextColor="#8a9a90"
+                  multiline
+                  textAlignVertical="top"
+                  maxLength={2000}
+                />
+                <View style={styles.reportActionRow}>
+                  <TouchableOpacity
+                    style={[styles.reportActionButton, styles.reportUpdateButton]}
+                    onPress={() => void sendReportCustomerUpdate(report)}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.reportActionButtonText}>
+                      Request More Information
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.reportActionButton, styles.reportRejectButton]}
+                    onPress={() =>
+                      void handleReportStatusChange(report, "rejected")
+                    }
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.reportActionButtonText}>
+                      Reject Report
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.reportControlLabel}>
+                  Resolution Details (required to resolve)
+                </Text>
+                <TextInput
+                  style={styles.reportResolutionInput}
+                  value={
+                    reportResolutionInputs[report.id] ??
+                    report.resolution ??
+                    ""
+                  }
+                  onChangeText={(value) =>
+                    setReportResolutionInputs((current) => ({
+                      ...current,
+                      [report.id]: value,
+                    }))
+                  }
+                  placeholder="Describe how the electricity issue was fixed"
+                  placeholderTextColor="#8a9a90"
+                  multiline
+                  textAlignVertical="top"
+                  maxLength={2000}
+                />
+                <Text style={styles.reportControlLabel}>Internal Notes</Text>
+                {(savedReportInternalNotes[report.id] || []).map((note) => (
+                  <Text
+                    key={note.id}
+                    style={styles.reportInternalNote}
+                  >
+                    {note.author} · {formatDateTime(note.createdAt)}: {note.text}
+                  </Text>
+                ))}
+                <TextInput
+                  style={styles.reportResolutionInput}
+                  value={reportInternalNotes[report.id] || ""}
+                  onChangeText={(value) =>
+                    setReportInternalNotes((current) => ({
+                      ...current,
+                      [report.id]: value,
+                    }))
+                  }
+                  placeholder="Add a note visible to admins only"
+                  placeholderTextColor="#8a9a90"
+                  multiline
+                  textAlignVertical="top"
+                  maxLength={2000}
+                />
+                <View style={styles.reportActionRow}>
+                  <TouchableOpacity
+                    style={[styles.reportActionButton, styles.reportResolveButton]}
+                    onPress={() =>
+                      void handleReportStatusChange(report, "resolved")
+                    }
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.reportActionButtonText}>
+                      Mark as Resolved
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.reportActionButton, styles.reportCloseButton]}
+                    onPress={() =>
+                      void handleReportStatusChange(report, "closed")
+                    }
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.reportCloseButtonText}>
+                      Close Report
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.reportActionButton, styles.reportUpdateButton]}
+                    onPress={() => void addReportInternalNote(report)}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.reportActionButtonText}>Add Note</Text>
+                  </TouchableOpacity>
+                </View>
+                  </View>
+                ) : null}
+              </View>
+            ))
+          )}
+        </View>
 
         {/* STATISTICS */}
         <View style={styles.statsRow}>
@@ -1067,6 +1777,16 @@ export default function AdminScreen() {
                 const liveBill =
                   customerLiveKwh *
                   electricityRate;
+                const lastMeterReading =
+                  application.lastMeterReading ??
+                  (application.currentReading &&
+                  application.currentReading > 0
+                    ? application.currentReading
+                    : application.previousReading ?? 0);
+                const lastEstimatedBill =
+                  application.lastEstimatedBill ??
+                  application.estimatedBill ??
+                  0;
 
                 return (
                   <View
@@ -1263,7 +1983,7 @@ export default function AdminScreen() {
                             styles.meterDetailLabel
                           }
                         >
-                          Recorded Bill
+                          Estimated Bill This Cycle
                         </Text>
 
                         <Text
@@ -1271,11 +1991,99 @@ export default function AdminScreen() {
                             styles.meterBillValue
                           }
                         >
-                          {formatCurrency(
-                            application.estimatedBill
-                          )}
+                          {formatCurrency(liveBill)}
                         </Text>
                       </View>
+                    </View>
+
+                    <View
+                      style={
+                        styles.meterDetailsRow
+                      }
+                    >
+                      <View
+                        style={
+                          styles.meterDetailColumn
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.meterDetailLabel
+                          }
+                        >
+                          Your Meter Reading
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.meterDetailValue
+                          }
+                        >
+                          {(
+                            lastMeterReading
+                          ).toFixed(2)}{" "}
+                          kWh
+                        </Text>
+                      </View>
+                      <View
+                        style={
+                          styles.meterDetailColumn
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.meterDetailLabel
+                          }
+                        >
+                          Previous Estimated Bill
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.meterBillValue
+                          }
+                        >
+                          {formatCurrency(lastEstimatedBill)}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.readingHistoryCard}>
+                      <Text style={styles.readingHistoryTitle}>
+                        Meter Reading History
+                      </Text>
+                      {meterReadings.filter(
+                        (reading) => reading.applicationId === application.id
+                      ).length === 0 ? (
+                        <Text style={styles.readingHistoryEmpty}>
+                          No saved meter readings yet.
+                        </Text>
+                      ) : (
+                        meterReadings
+                          .filter(
+                            (reading) =>
+                              reading.applicationId === application.id
+                          )
+                          .map((reading) => (
+                            <View
+                              key={reading.id}
+                              style={styles.readingHistoryRow}
+                            >
+                              <View style={styles.readingHistoryDetails}>
+                                <Text style={styles.readingHistoryDate}>
+                                  {formatDateTime(reading.readingDate)}
+                                </Text>
+                                <Text style={styles.readingHistoryInfo}>
+                                  Meter reading:{" "}
+                                  {reading.currentReading.toFixed(2)} kWh
+                                </Text>
+                              </View>
+                              <Text style={styles.readingHistoryBill}>
+                                {formatCurrency(reading.estimatedBill)}
+                              </Text>
+                            </View>
+                          ))
+                      )}
                     </View>
 
                     {/* LIVE CUSTOMER SIMULATOR */}
@@ -1479,26 +2287,28 @@ export default function AdminScreen() {
               Loading applications...
             </Text>
           </View>
-        ) : applications.length ===
-          0 ? (
+        ) : connectionApplications.length === 0 ? (
           <View
             style={styles.emptyCard}
           >
             <Text
               style={styles.emptyTitle}
             >
-              No Applications Yet
+              {applications.length === 0
+                ? "No Applications Yet"
+                : "No Connection Applications to Review"}
             </Text>
 
             <Text
               style={styles.emptyText}
             >
-              Customer new connection
-              applications will appear here.
+              {applications.length === 0
+                ? "Customer new connection applications will appear here."
+                : "Active applications are shown in Active Electricity Meters."}
             </Text>
           </View>
         ) : (
-          applications.map(
+          connectionApplications.map(
             (application) => {
               const isPending =
                 application.status.toLowerCase() ===
@@ -2212,6 +3022,344 @@ const styles = StyleSheet.create({
     lineHeight: 21,
   },
 
+  reportsSection: {
+    marginBottom: 14,
+  },
+
+  reportsSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+
+  reportsSectionTitle: {
+    color: "#153d27",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  reportsSectionSubtitle: {
+    color: "#718076",
+    fontSize: 12,
+    marginTop: 3,
+  },
+
+  reportsCount: {
+    minWidth: 30,
+    height: 30,
+    overflow: "hidden",
+    borderRadius: 15,
+    textAlign: "center",
+    textAlignVertical: "center",
+    color: "#176b3a",
+    backgroundColor: "#dff2e4",
+    fontSize: 13,
+    fontWeight: "900",
+    paddingTop: 6,
+  },
+
+  reportEmptyCard: {
+    padding: 16,
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#dce9df",
+  },
+
+  reportEmptyText: {
+    color: "#718076",
+    fontSize: 13,
+  },
+
+  reportCard: {
+    padding: 15,
+    marginBottom: 9,
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#dce9df",
+  },
+
+  reportDetailLabel: {
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "900",
+    marginTop: 8,
+  },
+
+  reportDetailValue: {
+    color: "#526258",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 4,
+  },
+
+  reportCardHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+
+  reportHeaderMeta: {
+    alignItems: "flex-end",
+    gap: 5,
+  },
+
+  reportDropdownIcon: {
+    color: "#176b3a",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  reportWorkPreview: {
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 8,
+  },
+
+  reportSubject: {
+    flex: 1,
+    color: "#153d27",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  reportDate: {
+    color: "#718076",
+    fontSize: 10,
+    textAlign: "right",
+  },
+
+  reportStatus: {
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 9,
+    fontWeight: "900",
+  },
+
+  reportStatusResolved: {
+    color: "#176b3a",
+    backgroundColor: "#dff2e4",
+  },
+
+  reportStatusOpen: {
+    color: "#8a5b08",
+    backgroundColor: "#fff2cf",
+  },
+
+  reportStatusPending: {
+    color: "#8a5b08",
+    backgroundColor: "#fff2cf",
+  },
+
+  reportStatusUnderReview: {
+    color: "#1557a0",
+    backgroundColor: "#e2efff",
+  },
+
+  reportStatusAssigned: {
+    color: "#a45b08",
+    backgroundColor: "#fff0df",
+  },
+
+  reportStatusInProgress: {
+    color: "#6840a0",
+    backgroundColor: "#f0e8ff",
+  },
+
+  reportStatusClosed: {
+    color: "#41464b",
+    backgroundColor: "#e9ecef",
+  },
+
+  reportStatusRejected: {
+    color: "#a12f2f",
+    backgroundColor: "#fff0f0",
+  },
+
+  reportCustomerName: {
+    color: "#176b3a",
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 6,
+  },
+
+  reportAssignee: {
+    color: "#718076",
+    fontSize: 11,
+    marginTop: 4,
+  },
+
+  reportFieldWorkBox: {
+    padding: 10,
+    backgroundColor: "#f1f8f3",
+    borderRadius: 9,
+    marginTop: 9,
+  },
+
+  reportFieldWorkUpdate: {
+    color: "#34443a",
+    fontSize: 11,
+    lineHeight: 17,
+    marginTop: 5,
+  },
+
+  reportDescription: {
+    color: "#34443a",
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 10,
+  },
+
+  reportResolutionLabel: {
+    color: "#34443a",
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 13,
+    marginBottom: 6,
+  },
+
+  reportResolutionInput: {
+    minHeight: 84,
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    borderRadius: 10,
+    padding: 10,
+    color: "#1d3425",
+    fontSize: 12,
+    lineHeight: 18,
+  },
+
+  reportControlLabel: {
+    color: "#34443a",
+    fontSize: 11,
+    fontWeight: "900",
+    marginTop: 14,
+    marginBottom: 7,
+  },
+
+  reportOptionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 7,
+  },
+
+  reportOption: {
+    minHeight: 34,
+    justifyContent: "center",
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: "#d6e2d9",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+  },
+
+  reportOptionSelected: {
+    borderColor: "#176b3a",
+    backgroundColor: "#176b3a",
+  },
+
+  reportOptionText: {
+    color: "#526258",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+
+  reportOptionTextSelected: {
+    color: "#ffffff",
+  },
+
+  reportActionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 10,
+  },
+
+  reportActionButton: {
+    minHeight: 38,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 9,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+  },
+
+  reportActionButtonText: {
+    color: "#ffffff",
+    fontSize: 11,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  reportAcceptButton: {
+    alignSelf: "flex-start",
+    backgroundColor: "#1557a0",
+    marginTop: 9,
+  },
+
+  reportRejectButton: {
+    backgroundColor: "#b33a3a",
+  },
+
+  reportUpdateButton: {
+    backgroundColor: "#176b3a",
+  },
+
+  reportCloseButton: {
+    backgroundColor: "#e9ecef",
+    borderWidth: 1,
+    borderColor: "#cbd2d8",
+  },
+
+  reportCloseButtonText: {
+    color: "#41464b",
+    fontSize: 11,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  reportInternalNote: {
+    color: "#526258",
+    fontSize: 11,
+    lineHeight: 17,
+    padding: 9,
+    borderRadius: 8,
+    backgroundColor: "#f2f4f3",
+    marginBottom: 6,
+  },
+
+  reportStatusButton: {
+    minHeight: 40,
+    alignSelf: "flex-start",
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    marginTop: 14,
+  },
+
+  reportResolveButton: {
+    backgroundColor: "#176b3a",
+  },
+
+  reportReopenButton: {
+    backgroundColor: "#f0f4f1",
+    borderWidth: 1,
+    borderColor: "#cbd8ce",
+  },
+
+  reportStatusButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
   userManagementButton: {
     backgroundColor: "#ffffff",
     borderRadius: 16,
@@ -2610,6 +3758,61 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "900",
     marginTop: 3,
+  },
+
+  readingHistoryCard: {
+    backgroundColor: "#f7fbf8",
+    borderRadius: 12,
+    padding: 13,
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: "#dcebdd",
+  },
+
+  readingHistoryTitle: {
+    color: "#153d27",
+    fontSize: 13,
+    fontWeight: "900",
+    marginBottom: 6,
+  },
+
+  readingHistoryEmpty: {
+    color: "#718076",
+    fontSize: 11,
+    paddingVertical: 6,
+  },
+
+  readingHistoryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#e5eee7",
+    paddingVertical: 9,
+  },
+
+  readingHistoryDetails: {
+    flex: 1,
+  },
+
+  readingHistoryDate: {
+    color: "#153d27",
+    fontSize: 11,
+    fontWeight: "800",
+    marginBottom: 2,
+  },
+
+  readingHistoryInfo: {
+    color: "#718076",
+    fontSize: 10,
+    marginTop: 2,
+  },
+
+  readingHistoryBill: {
+    color: "#176b3a",
+    fontSize: 12,
+    fontWeight: "900",
   },
 
   /*
